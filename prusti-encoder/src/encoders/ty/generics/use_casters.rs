@@ -45,6 +45,7 @@ impl<'vir> GArgCaster<'vir, Pure> {
     ) -> vir::ExprGenSnap<'vir, Curr, Next> {
         self.get()
             .map(|c| {
+                tracing::info!(?c, "Make generic pure");
                 c.cast.make_generic.call()(
                     e.downcast_ty(),
                     c.ty_args.get_ty(),
@@ -75,7 +76,10 @@ impl<'vir> GArgCaster<'vir, Pure> {
 impl<'vir> GArgCaster<'vir, Impure> {
     pub fn cast_to_callee_ctx(&self, e: vir::ExprRef<'vir>) -> Option<vir::Stmt<'vir>> {
         self.get()
-            .map(|c| (c.cast.make_generic)(e, c.ty_args.get_ty(), c.ty_args.get_const()))
+            .map(|c| {
+                tracing::info!(?c, "Make generic impure");
+                (c.cast.make_generic)(e, c.ty_args.get_ty(), c.ty_args.get_const()) // TODO: CONST parameter in func?
+            })
             .map(alloc_stmt)
     }
 

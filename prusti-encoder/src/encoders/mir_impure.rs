@@ -1409,6 +1409,7 @@ impl<'vir, 'enc, E: TaskEncoder> mir::visit::Visitor<'vir> for ImpureEncVisitor<
                             let method_assign_app =
                                 dest_ty_out.apply_method_assign(self.vcx, proj_enc, rval_enc.expr);
                             self.stmt(method_assign_app);
+                            // TODO: Init perm field
                             self.stmts(rval_enc.post_fold_stmts(proj_enc));
                         }
                         Err(_) => {
