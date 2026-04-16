@@ -12,7 +12,6 @@
   outputs =
     {
       self,
-      stdenv,
       nixpkgs,
       crane,
       rust-overlay,
@@ -25,7 +24,7 @@
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
-        inherit (pkgs) lib;
+        inherit (pkgs) lib stdenv;
 
         # Viper and prusti
         prustiVersion = "${self.tag or "${self.lastModifiedDate}.${self.shortRev or "dirty"}"}";
@@ -34,25 +33,32 @@
           pname = "viper";
           version = viperVersion;
 
-          src = pkgs.fetchzip {
+          src = pkgs.fetchzip rec {
             url = "https://github.com/viperproject/viper-ide/releases/download/${viperVersion}/ViperToolsLinux.zip";
             name = "viper";
             stripRoot = false;
             hash = "sha256-GyQ7LBOimr3eEfgMTMc9ZphV3LYYbkBRcS9UbM39+Qs=";
           };
 
-          nativeBuildInputs = [ pkgs.autoPatchelfHook ];
-          buildInputs = [];
+          buildInputs = [
+            # For basically all
+            stdenv.cc.cc.lib
+            # For Boogie
+            pkgs.zlib
+            pkgs.lttng-ust
+          ];
 
-          sourceRoot = ".";
+          # Cannot find this, most likely not needed anyway, right?
+          autoPatchelfIgnoreMissingDeps = [ "liblttng-ust.so.0" ];
+
+          nativeBuildInputs = with pkgs; [ autoPatchelfHook ];
+
           installPhase = ''
-          runHook preInstall
-          install -m755 -D $out/z3/bin/z3
-          runHook postInstall
-          '';
-
-          postFetch = ''
-          patchelf --set-interpreter $NIX_CC/
+            runHook preInstall
+            mkdir -p $out
+            cp -r ${src}/* $out
+            chmod 755 $out/z3/bin/z3
+            runHook postInstall
           '';
         };
         ow2Asm = pkgs.stdenv.mkDerivation rec {
