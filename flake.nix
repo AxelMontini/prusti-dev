@@ -33,7 +33,7 @@
           pname = "viper";
           version = viperVersion;
 
-          src = pkgs.fetchzip rec {
+          src = pkgs.fetchzip {
             url = "https://github.com/viperproject/viper-ide/releases/download/${viperVersion}/ViperToolsLinux.zip";
             name = "viper";
             stripRoot = false;
@@ -92,9 +92,12 @@
             pkgs.openssl
             viperToolchain
             ow2Asm
+            rustToolchain
+            jdk
           ];
 
           nativeBuildInputs = [
+            pkgs.autoPatchelfHook
             pkgs.makeWrapper
             pkgs.pkg-config
           ];
@@ -105,6 +108,11 @@
           ASM_JAR = "${ow2Asm}/asm.jar";
           RUST_SYSROOT = "${rustToolchain}";
           JAVA_HOME = "${jdk}/lib/openjdk";
+
+          # libjvm.so is not found otherwise
+          preBuild = ''
+            addAutoPatchelfSearchPath ${jdk}/lib/openjdk/lib/server
+          '';
         };
 
         # Build *just* the cargo dependencies (of the entire workspace),
@@ -132,7 +140,7 @@
               (craneLib.fileset.commonCargoSources crate)
             ];
           };
-        prusti = craneLib.buildPackage (
+        prusti_driver = craneLib.buildPackage (
           individualCrateArgs
           // {
             pname = "prusti";
@@ -140,10 +148,18 @@
             src = fileSetForCrate ./.;
           }
         );
+        prusti_launch = craneLib.buildPackage (
+          individualCrateArgs
+          // {
+            pname = "prusti-launch";
+            cargoExtraArgs = "-p prusti-launch";
+            src = fileSetForCrate ./.;
+          }
+        );
       in
       rec {
         packages = {
-          inherit prusti;
+          inherit prusti_driver prusti_launch;
         };
 
         checks = {
@@ -195,7 +211,7 @@
               '';
         };
 
-        defaultPackage = packages.prusti;
+        defaultPackage = packages.prusti_driver;
 
         # devShells.default = craneLib.devShell {
         #   # Inherit inputs from checks.

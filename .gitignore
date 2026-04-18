@@ -37,3 +37,7 @@ local-testing/simple.vpr
 
 rustc-*.txt
 *.specs
+
+# Nix build system
+/result
+/.direnv
