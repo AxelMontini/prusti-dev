@@ -57,7 +57,7 @@ impl TaskEncoder for IndirectPredicatesEnc {
                 // ignore for now). Plus it skips unsupported types if they
                 // don't have lifetimes.
                 _ if ty.args.args().is_empty() => (),
-                TySpecifics::Primitive(_) | TySpecifics::ImmRef(_) => (),
+                TySpecifics::Primitive(_) | TySpecifics::ImmRef(_) => (), // XXX: WIll edit
                 // TODO: it's not valid to have nothing for these. We should fix
                 // this by using an opaque predicate to represent potential
                 // indirect stuff. For example:
@@ -66,7 +66,7 @@ impl TaskEncoder for IndirectPredicatesEnc {
                 // case we would want a wand with `i32(result) --* opaque_behind_a(x)`.
                 // This is why we should return `opaque_behind_a(x)` here.
                 TySpecifics::Param(_) | TySpecifics::Opaque(_) | TySpecifics::ArrayLike(_) => (),
-                TySpecifics::MutRef((data, ref_domain)) => {
+                TySpecifics::MutRef((data, ref_domain)) => {// XXX: Explore
                     assert_eq!(ty.args.args().len(), 2);
                     let inner_ty = data.decompose_context(ty.ty.params, ty.args);
                     let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
