@@ -46,6 +46,10 @@
             # For Boogie
             pkgs.zlib
             pkgs.lttng-ust
+            pkgs.icu.dev
+            pkgs.openssl
+            pkgs.icu77
+            pkgs.openssl_3
           ];
 
           # Cannot find this, most likely not needed anyway, right?
@@ -59,6 +63,12 @@
             cp -r ${src}/* $out
             chmod 755 $out/z3/bin/z3
             runHook postInstall
+          '';
+
+          preFixup = ''
+            echo $LD_LIBRARY_PATH
+            patchelf --add-needed libicuuc.so.77 $out/boogie/Binaries/Boogie
+            patchelf --add-needed libssl.so.3 $out/boogie/Binaries/Boogie
           '';
         };
         ow2Asm = pkgs.stdenv.mkDerivation rec {
@@ -242,7 +252,7 @@
             shellHook = ''
               export RUST_SYSROOT="${rustToolchain}"
               export JAVA_HOME="${jdk}/lib/openjdk"
-              export LD_LIBRARY_PATH="${jdk}/lib/openjdk/lib/server"
+              export LD_LIBRARY_PATH="${jdk}/lib/openjdk/lib/server:${pkgs.icu77}/lib"
               export VIPER_HOME="${viperToolchain}/backends"
               export Z3_EXE="${viperToolchain}/z3/bin/z3"
               export ASM_JAR="${ow2Asm}/asm.jar"
