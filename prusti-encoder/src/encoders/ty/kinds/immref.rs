@@ -16,8 +16,8 @@ pub(crate) fn ty_pure<'vir>(
     deps: &mut TaskEncoderDependencies<'vir, TyPureEnc>,
     builder: &mut AdtBuilder<'vir>,
 ) -> Result<TyPureImmRef<'vir>, EncodeFullError<'vir, TyPureEnc>> {
-    // force encoding of s_Param
-    deps.require_ref::<TyUsePureEnc>(data.decompose(task_key.params))?;
+    // // force encoding of s_Param
+    // deps.require_ref::<TyUsePureEnc>(data.decompose(task_key.params))?;
 
     let (field_snaps_to_snap, field_access) =
         builder.constructor("", (vir::TYPE_REF, vir::TYPE_PSNAP), None);
@@ -101,11 +101,25 @@ pub(crate) fn ty_impure<'vir>(
         }), // TODO: use generic args?
     );
 
+    let arbitrary_value = builder.inner.function(
+        "arbitrary_value",
+        vir::TYPE_REF,
+        snap_type,
+        (ref_param,),
+        &[],
+        &[vir::expr! {
+            ([data.1.deref_access](result: [snap_type])) == ([ref_param_ex])
+        }],
+        None,
+    );
+
     // Ref-to-snap
     builder.mk_snap_function(Some(vir::expr! { [ref_field](ref_self) }));
 
     Ok(TyImpureImmRefData {
         current_value,
         current_perm,
+        arbitrary_value,
+        pure: *data.1,
     })
 }

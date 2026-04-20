@@ -54,6 +54,7 @@ pub struct TyUseImpureImmRef<'vir> {
     args: GArgsTy<'vir>,
     #[allow(dead_code)]
     impure: <ImpureTyDatas as TyDatas<'vir>>::ImmRefData,
+    ref_to_snap: vir::FunctionIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap), vir::Snap>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +157,7 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
                     caster,
                     args: self.args_t,
                     impure: *data.1,
+                    ref_to_snap: ty.1.ref_to_snap,
                 })
             }
             TySpecifics::MutRef(data) => {
@@ -315,6 +317,7 @@ impl<'vir> TyUseImpureData<'vir> {
 }
 
 impl<'vir> TyData<'vir, UseImpureTyDatas> {
+    #[tracing::instrument(skip(label), ret)]
     /// Fold the predicate (including generic casts).
     pub fn fold(
         &self,
@@ -354,7 +357,7 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                     })])
                     .collect()
             }
-            TySpecifics::ImmRef(..) => Vec::new(),
+            TySpecifics::ImmRef(data) => data.fold(self_ref, label).collect(), // XXX: This will require changes
             TySpecifics::MutRef(data) => data.fold(self_ref, label).into_iter().collect(),
             TySpecifics::StructLike(data) => data.fold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -405,7 +408,7 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                 )
                 .collect()
             }
-            TySpecifics::ImmRef(..) => Vec::new(),
+            TySpecifics::ImmRef(data) => data.unfold(self_ref, old).collect(),
             TySpecifics::MutRef(data) => data.unfold(self_ref, old).into_iter().collect(),
             TySpecifics::StructLike(data) => data.unfold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -514,7 +517,43 @@ impl<'vir> TyUseImpureEnum<'vir> {
     }
 }
 
-impl<'vir> TyUseImpureImmRef<'vir> {}
+impl<'vir> TyUseImpureImmRef<'vir> {
+    pub fn prim_to_snap_assign(&self, self_ref: vir::ExprRef<'vir>) -> vir::ExprCSnap<'vir> {
+        (self.impure.arbitrary_value)(self_ref)
+    }
+
+    pub fn deref(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> vir::ExprRef<'vir> {
+        let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
+            .downcast_ty();
+        let deref = self.impure.pure.deref_access.call()(snap);
+        tracing::info!(?deref, "TyUseImpureImmRef");
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
+    }
+
+    fn fold(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+        // TODO: Remove field from ref predicate and instead init it here
+        let exhale_perm = None;
+        let cast_to_callee = self.caster.cast_to_callee_ctx(self.deref(self_ref, label));
+
+        cast_to_callee.into_iter().chain(exhale_perm.into_iter())
+    }
+
+    fn unfold(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+        self.caster.cast_to_caller_ctx(self.deref(self_ref, label)).into_iter()
+    }
+}
 
 impl<'vir> TyUseImpureMutRef<'vir> {
     pub fn deref(
@@ -525,6 +564,7 @@ impl<'vir> TyUseImpureMutRef<'vir> {
         let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
             .downcast_ty();
         let deref = self.impure.pure.deref_access.call()(snap);
+        tracing::info!(?deref, "TyUseImpureMutRef");
         vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
     }
 
@@ -532,6 +572,7 @@ impl<'vir> TyUseImpureMutRef<'vir> {
         (self.impure.arbitrary_value)(self_ref)
     }
 
+    #[tracing::instrument(skip(label), ret)]
     fn fold(
         &self,
         self_ref: vir::ExprRef<'vir>,

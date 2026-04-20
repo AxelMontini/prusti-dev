@@ -179,7 +179,7 @@ where
 /// but we do also have the snapshot available.
 pub(crate) struct PlaceExpr<'vir> {
     address: vir::ExprRef<'vir>,
-    snap: Option<vir::ExprSnap<'vir>>,
+    snap: Option<vir::ExprSnap<'vir>>, // XXX: Look around for this
 }
 
 impl<'vir> PlaceExpr<'vir> {
@@ -410,12 +410,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
             mir::Rvalue::Ref(_reg, _kind, place) => Ok(match rvalue_ty.kind() {
                 TyKind::Ref(.., ty::Mutability::Not) => {
-                    let (address, snap, _, _) = self.encode_place_with_snap((*place).into());
-                    let inner = self.ty_use_pure(rvalue_ty).expect_immref();
-                    inner
-                        .prim_to_snap(address.expr.address, snap)
-                        .upcast_ty()
-                        .into()
+                    let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
+                    let (place_expr, _, _, _) = self.encode_place_with_snap((*place).into());
+                    let inner = p_rvalue_ty.expect_immref();
+                    // let place_ref = place_expr.expr.expect_predicate();
+                    let place_ref = place_expr.expr.address;
+                    EncodedRvalue {
+                        expr: inner.prim_to_snap_assign(place_ref).upcast_ty(),
+                        post_assign_folds: Some(Box::new(move |lhs_place| {
+                            p_rvalue_ty.fold(None, lhs_place, None, None, None)
+                        })),
+                    }
                 }
                 TyKind::Ref(.., ty::Mutability::Mut) => {
                     let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
@@ -1120,14 +1125,18 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                         }
                     }
                     ty::TyKind::Ref(_, _, ty::Mutability::Not) => {
-                        let snap = expr
-                            .snap
-                            .unwrap_or_else(|| e_ty.ref_to_snap(expr.address))
-                            .downcast_ty();
-                        let p_ty = self.ty_use_pure(place_ty.ty).expect_immref();
+                        // let snap = expr
+                        //     .snap
+                        //     .unwrap_or_else(|| e_ty.ref_to_snap(expr.address))
+                        //     .downcast_ty();
+                        // let p_ty = self.ty_use_pure(place_ty.ty).expect_immref();
+                        // PlaceExpr {
+                        //     address: p_ty.deref_access(snap),
+                        //     snap: Some(p_ty.value_access(snap)),
+                        // }
                         PlaceExpr {
-                            address: p_ty.deref_access(snap),
-                            snap: Some(p_ty.value_access(snap)),
+                            address: e_ty.expect_immref().deref(expr.address, None),
+                            snap: None,
                         }
                     }
                     ty::TyKind::Ref(_, _, ty::Mutability::Mut) => PlaceExpr {

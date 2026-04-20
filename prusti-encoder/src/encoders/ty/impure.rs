@@ -39,6 +39,9 @@ pub type TyImpureBuiltin<'vir> = <ImpureTyDatas as TyDatas<'vir>>::BuiltinData;
 pub struct TyImpureImmRefData<'vir> {
     pub current_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
     pub current_perm: vir::FunctionIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap), vir::Perm>,
+    /// For use in constructing a snapshot from just a `Ref`.
+    pub arbitrary_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
+    pub pure: <PureTyDatas as TyDatas<'vir>>::ImmRefData,
 }
 
 #[derive(Debug, Clone, Copy)]
