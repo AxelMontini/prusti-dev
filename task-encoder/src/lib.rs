@@ -1,6 +1,7 @@
 #![feature(rustc_private)]
 #![feature(associated_type_defaults)]
 
+use core::panic;
 use hashlink::LinkedHashMap;
 use prusti_rustc_interface::span::Span;
 use std::cell::RefCell;
@@ -23,6 +24,7 @@ pub struct Program<'vir> {
     methods: Vec<vir::Method<'vir>>,
 
     code: String,
+    encoder_errors: Vec<(String, Span)>,
 }
 
 impl<'vir> Program<'vir> {
@@ -78,6 +80,10 @@ impl<'vir> Program<'vir> {
             )
         })
     }
+
+    pub fn encoder_errors(&mut self) -> &mut Vec<(String, Span)> {
+        &mut self.encoder_errors
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -126,7 +132,7 @@ pub trait TaskEncoder {
     type EncodingError: Clone + std::fmt::Debug = NeverError;
 
     /// User-presentable name of this encoder.
-    const ENCODER_NAME: &'static str = "<untitled encoder>";
+    const ENCODER_NAME: &'static str;
 
     fn describe_task<'vir>(task: Self::TaskDescription<'vir>) -> String {
         format!("{task:?}")
@@ -169,6 +175,7 @@ pub trait TaskEncoder {
 
     fn encode_ref<'vir>(
         task: Self::TaskDescription<'vir>,
+        span: Span,
     ) -> Result<Self::OutputRef<'vir>, TaskEncoderError<Self>>
     where
         Self: 'vir,
@@ -196,7 +203,7 @@ pub trait TaskEncoder {
         // same task was (recursively) requested from the same encoder, before
         // its first invocation reached a call to `emit_output_ref`.
         // TODO: we should still make sure that *some* progress is done, because an actual cyclic dependency could cause a stack overflow?
-        let encode_res = Self::encode(task, false);
+        let encode_res = Self::encode(task, false, span);
         match encode_res {
             Ok(_) | Err(TaskEncoderError::DependencyError(..)) => (), // pass, check for output ref
             Err(err) => return Err(err),
@@ -222,6 +229,7 @@ pub trait TaskEncoder {
     fn encode<'vir>(
         task: Self::TaskDescription<'vir>,
         need_output: bool,
+        span: Span,
     ) -> EncodeResult<'vir, Self>
     where
         Self: 'vir,
@@ -233,7 +241,7 @@ pub trait TaskEncoder {
 
             match cache.get(&task_key) {
                 Some(e) => match e {
-                    TaskEncoderCacheState::ErrorEnqueue { error }
+                    TaskEncoderCacheState::ErrorEnqueue { error, .. }
                     | TaskEncoderCacheState::ErrorEncode { error, .. } => Some(Err(error.clone())),
                     TaskEncoderCacheState::Encoded {
                         output_ref,
@@ -265,8 +273,53 @@ pub trait TaskEncoder {
             return in_cache;
         }
 
-        let mut deps = TaskEncoderDependencies::new();
-        let encode_result = Self::do_encode_full(&task_key, &mut deps);
+        let value = task_key.clone();
+        let catch_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut deps = TaskEncoderDependencies::new();
+            let encode_result = Self::do_encode_full(&value, &mut deps);
+            (encode_result, deps)
+        }));
+
+        let (encode_result, deps) = catch_result.map_err(|panic_payload| {
+            // There was a panic within the encoder. We want to report it
+            // and return an error to the caller.
+            let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<unknown panic>".to_string()
+            };
+            let error = TaskEncoderError::PanicError(msg);
+            Self::with_cache(|cache| {
+                let mut cache = cache.borrow_mut();
+                match cache.get(&task_key) {
+                    Some(TaskEncoderCacheState::Started { output_ref }) => {
+                        let output_ref = output_ref.clone();
+                        cache.insert(
+                            task_key.clone(),
+                            TaskEncoderCacheState::ErrorEncode {
+                                output_ref,
+                                deps: TaskEncoderDependencies::new(),
+                                error: error.clone(),
+                                output_dep: None,
+                                spans: vec![span],
+                            },
+                        );
+                    }
+                    _ => {
+                        cache.insert(
+                            task_key.clone(),
+                            TaskEncoderCacheState::ErrorEnqueue {
+                                error: error.clone(),
+                                spans: vec![span],
+                            },
+                        );
+                    }
+                }
+            });
+            error
+        })?;
 
         let output_ref = Self::with_cache(|cache| match cache.borrow().get(&task_key) {
             Some(
@@ -326,7 +379,7 @@ pub trait TaskEncoder {
                             Ok(None)
                         }
                     }
-                    TaskEncoderCacheState::ErrorEnqueue { error }
+                    TaskEncoderCacheState::ErrorEnqueue { error, .. }
                     | TaskEncoderCacheState::ErrorEncode { error, .. } => Err(error.clone()),
                     TaskEncoderCacheState::Started { .. } | TaskEncoderCacheState::Enqueued => {
                         panic!("encoder did not finish for task {task_key:?}")
@@ -350,6 +403,7 @@ pub trait TaskEncoder {
                             deps,
                             error: TaskEncoderError::DependencyError(owned_stack.clone()),
                             output_dep: None,
+                            spans: vec![span],
                         },
                     )
                 });
@@ -364,6 +418,7 @@ pub trait TaskEncoder {
                             deps,
                             error: TaskEncoderError::EncodingError(err.clone()),
                             output_dep: maybe_output_dep,
+                            spans: vec![span],
                         },
                     )
                 });
@@ -484,29 +539,36 @@ pub trait TaskEncoder {
         deps: &mut TaskEncoderDependencies<'vir, Self>,
     ) -> EncodeFullResult<'vir, Self>;
 
-    #[track_caller]
-    fn all_outputs_local_no_errors<'vir>() -> Vec<Self::OutputFullLocal<'vir>>
+    fn all_outputs_local_no_errors<'vir>(
+        program: &mut Program<'vir>,
+    ) -> Vec<Self::OutputFullLocal<'vir>>
     where
         Self: 'vir,
     {
         let (outputs, errored) = Self::all_outputs_local();
-        assert!(
-            errored.is_empty(),
-            "Encoder {} has errored outputs: {:?}",
-            Self::ENCODER_NAME,
-            errored
-        );
+        for (key, error, spans) in errored {
+            let span = spans
+                .into_iter()
+                .next()
+                .unwrap_or(prusti_rustc_interface::span::DUMMY_SP);
+            let msg = match error {
+                TaskEncoderError::EncodingError(err) => Self::describe_error(err),
+                other => format!(
+                    "encoder '{}' failed to encode {:?}:\n {:?}",
+                    Self::ENCODER_NAME,
+                    key,
+                    other
+                ),
+            };
+            program.encoder_errors.push((msg, span));
+        }
         outputs
     }
 
     #[allow(clippy::type_complexity)]
     fn all_outputs_local<'vir>() -> (
         Vec<Self::OutputFullLocal<'vir>>,
-        Vec<(
-            Self::TaskKey<'vir>,
-            Self::OutputRef<'vir>,
-            TaskEncoderError<Self>,
-        )>,
+        Vec<(Self::TaskKey<'vir>, TaskEncoderError<Self>, Vec<Span>)>,
     )
     where
         Self: 'vir,
@@ -519,10 +581,9 @@ pub trait TaskEncoder {
                     TaskEncoderCacheState::Encoded { output_local, .. } => {
                         outputs.push(output_local.clone());
                     }
-                    TaskEncoderCacheState::ErrorEncode {
-                        output_ref, error, ..
-                    } => {
-                        errored.push((key.clone(), output_ref.clone(), error.clone()));
+                    TaskEncoderCacheState::ErrorEncode { error, spans, .. }
+                    | TaskEncoderCacheState::ErrorEnqueue { error, spans } => {
+                        errored.push((key.clone(), error.clone(), spans.clone()));
                     }
                     _ => panic!("task encoder not completed: {key:?}"),
                 }

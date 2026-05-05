@@ -26,13 +26,14 @@ pub struct TraitImplEnc;
 
 impl TaskEncoder for TraitImplEnc {
     task_encoder::encoder_cache!(TraitImplEnc);
+    const ENCODER_NAME: &'static str = "trait impl encoder";
 
     fn task_to_key<'vir>(task: &Self::TaskDescription<'vir>) -> Self::TaskKey<'vir> {
         *task
     }
 
     fn emit_outputs<'vir>(program: &mut task_encoder::Program<'vir>) {
-        for (dom, methods) in Self::all_outputs_local_no_errors() {
+        for (dom, methods) in Self::all_outputs_local_no_errors(program) {
             program.add_domain(dom);
             for method in methods {
                 program.add_method(method);
@@ -145,7 +146,7 @@ impl TaskEncoder for TraitImplEnc {
                                 tcx.type_of(impl_item_def_id).instantiate_identity(),
                                 impl_item_context,
                             ),
-                        );
+                        )?;
                         axioms.push(vcx.mk_domain_axiom(
                             vir_format_identifier!(vcx, "{trait_name}_impl_{implementing_ty}_{idx}_assoc_type_{item_name}"),
                             vir::expr! {forall ..[trait_ty_decls], ..[trait_const_decls] :: {[assoc_type(trait_tys, trait_consts)]} ([assoc_type(trait_tys, trait_consts)]) == (assoc_type_expr)},
