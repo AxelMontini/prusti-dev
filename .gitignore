@@ -37,3 +37,10 @@ local-testing/simple.vpr
 
 rustc-*.txt
 *.specs
+
+# Nix
+/.direnv
+/result
+
+# Axel
+/deleteme
