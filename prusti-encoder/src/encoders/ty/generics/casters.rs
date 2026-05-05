@@ -41,8 +41,9 @@ impl PurityCasters for Pure {
 }
 
 impl PurityCasters for Impure {
-    type MakeGeneric<'vir> = MethodIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>;
-    type MakeConcrete<'vir> = MethodIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>;
+    type MakeGeneric<'vir> = MethodIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap, vir::Perm)>;
+    type MakeConcrete<'vir> =
+        MethodIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap, vir::Perm)>;
 }
 
 impl<'vir, P: PurityCasters> task_encoder::OutputRefAny for GArgCasters<'vir, P> {}
@@ -225,12 +226,22 @@ impl TaskEncoder for CastersEnc<Impure> {
 
             let make_generic_ident = MethodIdn::new(
                 vir::vir_format_identifier!(vcx, "make_generic_{base_name}"),
-                (vir::TYPE_REF, generics.ty_args(), generics.const_args()),
+                (
+                    vir::TYPE_REF,
+                    generics.ty_args(),
+                    generics.const_args(),
+                    vir::TYPE_PERM,
+                ),
             );
 
             let make_concrete_ident = MethodIdn::new(
                 vir::vir_format_identifier!(vcx, "make_concrete_{base_name}"),
-                (vir::TYPE_REF, generics.ty_args(), generics.const_args()),
+                (
+                    vir::TYPE_REF,
+                    generics.ty_args(),
+                    generics.const_args(),
+                    vir::TYPE_PERM,
+                ),
             );
 
             deps.emit_output_ref(
@@ -245,16 +256,30 @@ impl TaskEncoder for CastersEnc<Impure> {
                 .make_generic;
             let self_decl = vcx.mk_local_decl("self", vir::TYPE_REF);
             let self_expr = vcx.mk_local_ex(self_decl);
-            let decls = (self_decl, generics.ty_decls(), generics.const_decls());
+            let perm_decl = vcx.mk_local_decl("p", vir::TYPE_PERM);
+            let perm_expr = vcx.mk_local_ex(perm_decl);
+            let decls = (
+                self_decl,
+                generics.ty_decls(),
+                generics.const_decls(),
+                perm_decl,
+            );
 
             let predicate_ref = deps.require_ref::<TyImpureEnc>(concrete)?;
             let generic_ref = deps.require_ref::<TyImpureEnc>(param)?;
+
+            let perm_bounds = vcx.mk_conj(&[
+                vcx.mk_bin_op_expr(vir::BinOpKind::CmpGt, vcx.mk_no_perm(), perm_expr)
+                    .downcast_ty(),
+                vcx.mk_bin_op_expr(vir::BinOpKind::CmpGe, perm_expr, vcx.mk_full_perm())
+                    .downcast_ty(),
+            ]);
 
             let concrete_predicate = (predicate_ref.ref_to_pred)(
                 self_expr,
                 generics.ty_exprs(),
                 generics.const_exprs(),
-            )(None);
+            )(Some(perm_expr));
 
             let concrete_snap =
                 (predicate_ref.ref_to_snap)(self_expr, generics.ty_exprs(), generics.const_exprs())
@@ -266,7 +291,7 @@ impl TaskEncoder for CastersEnc<Impure> {
                 (ty_constructor.ty_constructor)(generics.ty_exprs(), generics.const_exprs());
 
             let generic_predicate =
-                (generic_ref.ref_to_pred)(self_expr, &[lifted_ty_expr], &[])(None);
+                (generic_ref.ref_to_pred)(self_expr, &[lifted_ty_expr], &[])(Some(perm_expr));
 
             let generic_snap = (generic_ref.ref_to_snap)(self_expr, &[lifted_ty_expr], &[])
                 .downcast_ty::<vir::PSnap>();
@@ -291,7 +316,7 @@ impl TaskEncoder for CastersEnc<Impure> {
                 make_generic_ident,
                 decls,
                 &[],
-                vcx.alloc_slice(&[concrete_predicate]),
+                vcx.alloc_slice(&[perm_bounds, concrete_predicate]),
                 vcx.alloc_slice(&[generic_predicate, make_generic_same_snap]),
                 None,
             );
@@ -300,7 +325,7 @@ impl TaskEncoder for CastersEnc<Impure> {
                 make_concrete_ident,
                 decls,
                 &[],
-                vcx.alloc_slice(&[generic_predicate]),
+                vcx.alloc_slice(&[perm_bounds, generic_predicate]),
                 vcx.alloc_slice(&[concrete_predicate, make_concrete_same_snap]),
                 None,
             );
