@@ -25,6 +25,7 @@ impl<'vir> TyDatas<'vir> for ImpureTyDatas {
     type VariantData = TyImpureVariantData<'vir>;
     type EnumData = TyImpureEnumData<'vir>;
     type BuiltinData = ();
+    type ParamData = TyImpureParamData<'vir>;
 }
 
 pub type TyImpure<'vir> = Ty<'vir, ImpureTyDatas>;
@@ -36,9 +37,19 @@ pub type TyImpureMutRef<'vir> = <ImpureTyDatas as TyDatas<'vir>>::MutRefData;
 pub type TyImpureBuiltin<'vir> = <ImpureTyDatas as TyDatas<'vir>>::BuiltinData;
 
 #[derive(Debug, Clone, Copy)]
+pub struct TyImpureParamData<'vir> {
+    pub perm_field: vir::FieldPerm<'vir>,
+    /// Args: `(target, source, ...generics)`
+    ///
+    /// Halves `source.perm_field`, takes away that amount of access from `p_Param(source, ...)` and
+    /// gives the same amount to `p_Param(target, ...)`. Also ensures snapshot equality between
+    /// `target` and `source`.
+    pub share: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct TyImpureImmRefData<'vir> {
-    pub current_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
-    pub current_perm: vir::FunctionIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap), vir::Perm>,
+    pub arbitrary_value: FunctionIdn<'vir, vir::Ref, vir::CSnap>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,7 +190,7 @@ impl TaskEncoder for TyImpureEnc {
                     super::kinds::primitive::ty_impure(prim, deps, &mut builder)?,
                 ),
                 TySpecifics::ImmRef(immref) => TySpecifics::ImmRef(
-                    super::kinds::immref::ty_impure(immref, deps, &mut builder)?,
+                    super::kinds::immref::ty_impure(&ty, immref, deps, &mut builder)?,
                 ),
                 TySpecifics::MutRef(mutref) => TySpecifics::MutRef(
                     super::kinds::mutref::ty_impure(mutref, deps, &mut builder)?,
