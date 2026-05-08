@@ -54,6 +54,7 @@ pub struct TyUseImpureImmRef<'vir> {
     args: GArgsTy<'vir>,
     #[allow(dead_code)]
     impure: <ImpureTyDatas as TyDatas<'vir>>::ImmRefData,
+    ref_to_snap: vir::FunctionIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap), vir::Snap>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +114,7 @@ impl TaskEncoder for TyUseImpureEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut task_encoder::TaskEncoderDependencies<'vir, Self>,
@@ -142,6 +144,7 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
         Self { deps, args_t, args }
     }
 
+    #[tracing::instrument(skip(self), fields(self.args_t = ?self.args_t, self.args = ?self.args))]
     fn encode_ty(
         &mut self,
         ty: TyData<'vir, (RustTyDatas, ImpureTyDatas)>,
@@ -153,10 +156,12 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
             TySpecifics::Primitive(..) => TySpecifics::mk_primitive(()),
             TySpecifics::ImmRef(data) => {
                 let caster = self.encode_normalized(*data.0, ty.0.params);
+                tracing::debug!(?caster, "ImmRef Caster");
                 TySpecifics::mk_immref(TyUseImpureImmRef {
                     caster,
                     args: self.args_t,
                     impure: *data.1,
+                    ref_to_snap: ty.1.ref_to_snap,
                 })
             }
             TySpecifics::MutRef(data) => {
@@ -193,6 +198,7 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
         params: GParams<'vir>,
     ) -> FieldCaster<'vir> {
         let normalized = inner.decompose_compare_normalize(params, self.args);
+        tracing::debug!(?normalized, "Result of decompose_compare_normalize");
         self.deps
             .require_dep::<GArgsCastEnc<Impure>>(normalized)
             .unwrap()
@@ -355,7 +361,7 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                     })])
                     .collect()
             }
-            TySpecifics::ImmRef(..) => Vec::new(),
+            TySpecifics::ImmRef(data) => data.fold(self_ref, label, perm).into_iter().collect(),
             TySpecifics::MutRef(data) => data.fold(self_ref, label).into_iter().collect(),
             TySpecifics::StructLike(data) => data.fold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -406,7 +412,7 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                 )
                 .collect()
             }
-            TySpecifics::ImmRef(..) => Vec::new(),
+            TySpecifics::ImmRef(data) => data.unfold(self_ref, old, perm).into_iter().collect(),
             TySpecifics::MutRef(data) => data.unfold(self_ref, old).into_iter().collect(),
             TySpecifics::StructLike(data) => data.unfold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -515,7 +521,73 @@ impl<'vir> TyUseImpureEnum<'vir> {
     }
 }
 
-impl<'vir> TyUseImpureImmRef<'vir> {}
+impl<'vir> TyUseImpureImmRef<'vir> {
+    pub fn deref(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> vir::ExprRef<'vir> {
+        let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
+            .downcast_ty();
+        let deref = self.impure.pure.deref_access.call()(snap);
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
+    }
+
+    pub fn deref_perm_field_value(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> vir::ExprPerm<'vir> {
+        let deref = self.deref(self_ref, label);
+        vir::with_vcx(|vcx| vcx.mk_field_expr(deref, self.impure.perm_field))
+    }
+
+    pub fn prim_to_snap_assign(&self, self_ref: vir::ExprRef<'vir>) -> vir::ExprCSnap<'vir> {
+        (self.impure.arbitrary_value)(self_ref)
+    }
+
+    /// If [`perm`] is `None`, then the value of the perm field is used.
+    fn fold(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> Option<vir::Stmt<'vir>> {
+        // TODO: Cast the available amount only, using the perm field.
+        self.caster.partial_cast_to_callee_ctx(
+            self.deref(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_perm_field_value(self_ref, label)),
+        )
+    }
+
+    /// If [`perm`] is `None`, then the value of the perm field is used.
+    fn unfold(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> Option<vir::Stmt<'vir>> {
+        // TODO: Cast the available amount only, using the perm field.
+        self.caster.partial_cast_to_caller_ctx(
+            self.deref(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_perm_field_value(self_ref, label)),
+        )
+    }
+
+    pub(crate) fn init_bind_shadow(
+        &self,
+        lhs_place: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+        let stmt: vir::Stmt<'_> = vir::with_vcx(|vcx| {
+            vcx.alloc(vir::StmtGenData::new(vcx.alloc((self.impure.bind_shared)(
+                lhs_place,
+                self.args.get_ty(),
+                self.args.get_const(),
+            ))))
+        });
+        Some(stmt).into_iter()
+    }
+}
 
 impl<'vir> TyUseImpureMutRef<'vir> {
     pub fn deref(

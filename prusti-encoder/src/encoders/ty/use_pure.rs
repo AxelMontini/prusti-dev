@@ -107,6 +107,7 @@ impl TaskEncoder for TyUsePureEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut task_encoder::TaskEncoderDependencies<'vir, Self>,
@@ -149,6 +150,7 @@ impl<'a, 'vir> TyUsePureWalker<'a, 'vir> {
         TyUsePureWalker { deps, args_t, args }
     }
 
+    #[tracing::instrument(skip(self), fields(self.args_t, self.args))]
     fn encode_ty(
         &mut self,
         ty: TyData<'vir, (RustTyDatas, PureTyDatas)>,
@@ -160,11 +162,12 @@ impl<'a, 'vir> TyUsePureWalker<'a, 'vir> {
             }
             TySpecifics::Opaque(data) => TySpecifics::mk_opaque(*data.1),
             TySpecifics::Primitive(data) => TySpecifics::mk_primitive(*data.1),
-            TySpecifics::ImmRef(data) => {
-                let caster = self.encode_normalized(*data.0, ty.0.params);
+            TySpecifics::ImmRef((data, ref_domain)) => {
+                tracing::debug!(?data, ?ref_domain, "TyUsePureWalker::encode_ty on ImmRef");
+                let caster = self.encode_normalized(**data, ty.0.params);
                 TySpecifics::mk_immref(TyUsePureImmRef {
                     caster,
-                    pure: *data.1,
+                    pure: **ref_domain,
                 })
             }
             TySpecifics::MutRef((data, ref_domain)) => {

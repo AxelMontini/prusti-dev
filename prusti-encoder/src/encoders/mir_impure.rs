@@ -410,12 +410,30 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
             mir::Rvalue::Ref(_reg, _kind, place) => Ok(match rvalue_ty.kind() {
                 TyKind::Ref(.., ty::Mutability::Not) => {
-                    let (address, snap, _, _) = self.encode_place_with_snap((*place).into());
-                    let inner = self.ty_use_pure(rvalue_ty).expect_immref();
-                    inner
-                        .prim_to_snap(address.expr.address, snap)
-                        .upcast_ty()
-                        .into()
+                    let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
+                    let (place_expr, _, _, _) = self.encode_place_with_snap(Place::from(*place));
+
+                    let inner = p_rvalue_ty.expect_immref();
+                    let place_ref = place_expr.expr.address;
+                    EncodedRvalue {
+                        expr: inner.prim_to_snap_assign(place_ref).upcast_ty(),
+                        post_assign_folds: Some(Box::new(move |lhs_place| {
+                            // Before sharing the original ref and binding it to the shadow ref, we
+                            // must have `acc(p_Param(rhs, ty), rhs.perm_field)`. It then gets
+                            // halved by binding.
+                            // NOTE: `perm` parameter is ignored
+                            let mut stmts = p_rvalue_ty.fold(
+                                None,
+                                lhs_place,
+                                None,
+                                Some(inner.deref_perm_field_value(lhs_place, None)),
+                                None,
+                            );
+                            // Point &T to the "shadow" Ref, which gets bound to the original rhs Ref.
+                            stmts.extend(inner.init_bind_shadow(lhs_place));
+                            stmts
+                        })),
+                    }
                 }
                 TyKind::Ref(.., ty::Mutability::Mut) => {
                     let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
@@ -513,10 +531,11 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             label.map(vir::OldLabel::Label)
         };
 
-        // We don't want to unfold because for immutable refs we only use snapshot read/writes
-        if place.is_shared_ref(self.pcg_ctxt()) || place.projects_shared_ref(self.pcg_ctxt()) {
-            return;
-        }
+        // Not anymore!
+        // // We don't want to unfold because for immutable refs we only use snapshot read/writes
+        // if place.is_shared_ref(self.pcg_ctxt()) || place.projects_shared_ref(self.pcg_ctxt()) {
+        //     return;
+        // }
 
         let ref_p = self.encode_place(place);
 
@@ -621,6 +640,45 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 // folded into the Rvalue `&mut y` that is stored in `x`. This
                 // reverses that effect
                 self.unfold(borrow.assigned_ref(), label);
+            }
+            BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
+                if edge_action.is_add()
+                    && let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind() =>
+            {
+                comment!(self, "ADD: BORROW FLOW");
+                // TODO: What other conditions ^^^ ???
+                let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
+                    unreachable!();
+                };
+                let src = src.as_local_place().unwrap();
+                let dst = borrow_flow.short().base();
+
+                let ctxt = CompilerCtxt::new(self.body, self.vcx.tcx(), ());
+                let src_ty = src.ty(ctxt).ty;
+                let dst_ty = dst.ty(ctxt).ty;
+                if let ty::TyKind::Ref(_, _, ty::Mutability::Not) = dst_ty.kind() {
+                    // We don't want to undo the unsize operation for shared
+                    // references; the slice cannot have modified the array it
+                    // unsized.
+                    return Ok(());
+                }
+
+                let src_place = src.place();
+                let src_label = if let MaybeLabelledPlace::Labelled(snap) = src {
+                    Some(self.get_location_label(snap.at()))
+                } else {
+                    label.map(vir::OldLabel::Label)
+                };
+                let dst_place = dst.place();
+                let dst_label = if let MaybeLabelledPlace::Labelled(snap) = dst {
+                    Some(self.get_location_label(snap.at()))
+                } else {
+                    label.map(vir::OldLabel::Label)
+                };
+                let src_enc = self.encode_place(src_place).expr.expect_predicate();
+                let src_enc_old = self.vcx.maybe_apply_label(src_enc, src_label);
+                let dst_enc = self.encode_place(dst_place).expr.expect_predicate();
+                let dst_enc_old = self.vcx.maybe_apply_label(dst_enc, dst_label);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
@@ -1138,17 +1196,10 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             }),
                         }
                     }
-                    ty::TyKind::Ref(_, _, ty::Mutability::Not) => {
-                        let snap = expr
-                            .snap
-                            .unwrap_or_else(|| e_ty.ref_to_snap(expr.address))
-                            .downcast_ty();
-                        let p_ty = self.ty_use_pure(place_ty.ty).expect_immref();
-                        PlaceExpr {
-                            address: p_ty.deref_access(snap),
-                            snap: Some(p_ty.value_access(snap)),
-                        }
-                    }
+                    ty::TyKind::Ref(_, _, ty::Mutability::Not) => PlaceExpr {
+                        address: e_ty.expect_immref().deref(expr.address, None),
+                        snap: None,
+                    },
                     ty::TyKind::Ref(_, _, ty::Mutability::Mut) => PlaceExpr {
                         address: e_ty.expect_mutref().deref(expr.address, None),
                         snap: None,
