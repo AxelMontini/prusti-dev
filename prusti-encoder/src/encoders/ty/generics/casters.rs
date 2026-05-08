@@ -61,6 +61,7 @@ impl TaskEncoder for CastersEnc<Pure> {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,
@@ -212,11 +213,13 @@ impl TaskEncoder for CastersEnc<Impure> {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,
     ) -> EncodeFullResult<'vir, Self> {
         let (param, concrete) = task_key;
+        tracing::debug!(?param, ?concrete, "CastersEnc<Impure>");
         assert!(param.specifics.is_param() && !concrete.specifics.is_param());
         vir::with_vcx(|vcx| {
             use vir::CastType;
@@ -266,12 +269,13 @@ impl TaskEncoder for CastersEnc<Impure> {
             );
 
             let predicate_ref = deps.require_ref::<TyImpureEnc>(concrete)?;
+            tracing::debug!(?param, "DIOPORCO");
             let generic_ref = deps.require_ref::<TyImpureEnc>(param)?;
 
             let perm_bounds = vcx.mk_conj(&[
-                vcx.mk_bin_op_expr(vir::BinOpKind::CmpGt, vcx.mk_no_perm(), perm_expr)
+                vcx.mk_bin_op_expr(vir::BinOpKind::CmpLt, vcx.mk_no_perm(), perm_expr)
                     .downcast_ty(),
-                vcx.mk_bin_op_expr(vir::BinOpKind::CmpGe, perm_expr, vcx.mk_full_perm())
+                vcx.mk_bin_op_expr(vir::BinOpKind::CmpLe, perm_expr, vcx.mk_full_perm())
                     .downcast_ty(),
             ]);
 

@@ -25,7 +25,7 @@ impl<'vir> TyDatas<'vir> for ImpureTyDatas {
     type VariantData = TyImpureVariantData<'vir>;
     type EnumData = TyImpureEnumData<'vir>;
     type BuiltinData = ();
-    type ParamData = TyImpureParamData<'vir>;
+    // type ParamData = TyImpureParamData<'vir>;
 }
 
 pub type TyImpure<'vir> = Ty<'vir, ImpureTyDatas>;
@@ -36,20 +36,28 @@ pub type TyImpureImmRef<'vir> = <ImpureTyDatas as TyDatas<'vir>>::ImmRefData;
 pub type TyImpureMutRef<'vir> = <ImpureTyDatas as TyDatas<'vir>>::MutRefData;
 pub type TyImpureBuiltin<'vir> = <ImpureTyDatas as TyDatas<'vir>>::BuiltinData;
 
+// #[derive(Debug, Clone, Copy)]
+// pub struct TyImpureParamData<'vir> {}
+
 #[derive(Debug, Clone, Copy)]
-pub struct TyImpureParamData<'vir> {
+pub struct TyImpureImmRefData<'vir> {
+    pub pure: <PureTyDatas as TyDatas<'vir>>::ImmRefData,
+    /// Each ImmRef maps to a certain viper Ref. This is NOT the original value that was borrowed.
+    /// Instead, each time an ImmRef `y` is created, it points to `p_Ref_immutable_shared(y)`.
+    /// Then, after an assignment, this Ref is `shared from` the original one by using [`Self::bind_shared`]
+    pub shadow_ref: FunctionIdn<'vir, vir::Ref, vir::Ref>,
     pub perm_field: vir::FieldPerm<'vir>,
     /// Args: `(target, source, ...generics)`
     ///
     /// Halves `source.perm_field`, takes away that amount of access from `p_Param(source, ...)` and
     /// gives the same amount to `p_Param(target, ...)`. Also ensures snapshot equality between
     /// `target` and `source`.
-    pub share: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct TyImpureImmRefData<'vir> {
-    pub arbitrary_value: FunctionIdn<'vir, vir::Ref, vir::CSnap>,
+    pub bind_shared: vir::MethodIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
+    /// Creates a snapshot type set to the given Ref. It's used only during
+    /// the initial step of an ImmRef assignment. The value is then unset from the ref, and instead
+    /// the "shadow" Ref of the ImmRef takes its place. The original value is still needed
+    /// in order to bind the shadow Ref, using [`bind_shared`].
+    pub arbitrary_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +147,7 @@ impl TaskEncoder for TyImpureEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,

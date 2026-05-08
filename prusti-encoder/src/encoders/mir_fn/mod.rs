@@ -89,6 +89,7 @@ pub fn encode_all_in_crate<'tcx>(tcx: ty::TyCtxt<'tcx>) {
                 .unwrap_or_default();
 
                 if !(is_trusted && is_pure) {
+                    tracing::debug!(?def_id, "Starting method encode");
                     let _ = method::MethodEnc::encode(def_id, false, DUMMY_SP);
                 }
             }
