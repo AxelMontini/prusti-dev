@@ -1,17 +1,15 @@
-use std::ops::Deref;
-
 use crate::encoders::{
     TyUsePureEnc,
     ty::{
-        LazyRustTy, RustImmRef, RustParam, RustTyDatas,
+        RustImmRef, RustTyDatas,
         data::TyData,
-        generics::{GArgsTyEnc, GParams},
+        generics::GParams,
         impure::{PredicateBuilder, TyImpureEnc, TyImpureImmRef, TyImpureImmRefData},
         pure::{AdtBuilder, PureTyDatas, TyPureEnc, TyPureImmRef, TyPureImmRefData},
     },
 };
 use task_encoder::{EncodeFullError, TaskEncoderDependencies};
-use vir::{CastType, LocalDeclRef};
+use vir::CastType;
 
 pub(crate) fn ty_pure<'vir>(
     task_key: &TyData<'vir, RustTyDatas>,
@@ -33,7 +31,7 @@ pub(crate) fn ty_pure<'vir>(
 }
 
 pub(crate) fn ty_impure<'vir>(
-    task_key: &TyData<'vir, (RustTyDatas, PureTyDatas)>,
+    _task_key: &TyData<'vir, (RustTyDatas, PureTyDatas)>,
     data: &(&RustImmRef<'vir>, &TyPureImmRef<'vir>),
     deps: &mut TaskEncoderDependencies<'vir, TyImpureEnc>,
     builder: &mut PredicateBuilder<'vir>,
@@ -199,7 +197,7 @@ pub(crate) fn ty_impure<'vir>(
             builder.params.const_exprs(),
         )(Some(old_source_new_perm_field))),
     );
-    let post_wand = builder.vcx.mk_wand_expr(post_wand);
+    let post_wand_expr = builder.vcx.mk_wand_expr(post_wand);
 
     // Binds &T `ref_target` to its shadow, which is snapshot-equal to `ref_source`
     let bind_shared = builder.inner.method(
@@ -229,7 +227,7 @@ pub(crate) fn ty_impure<'vir>(
             post_perm_field_value,
             target_param,
             same_snap,
-            post_wand,
+            post_wand_expr,
         ],
     );
 
@@ -239,5 +237,6 @@ pub(crate) fn ty_impure<'vir>(
         shadow_ref,
         bind_shared,
         arbitrary_value,
+        post_wand,
     })
 }
