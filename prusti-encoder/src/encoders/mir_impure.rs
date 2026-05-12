@@ -522,6 +522,27 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         Ok(new_stmts)
     }
 
+    pub(crate) fn init_bind_shadow(
+        &mut self,
+        base: MaybeLabelledPlace<'vir>,
+        label: Option<&'vir str>,
+    ) {
+        let place = base.place();
+        let label = match base {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p = self.encode_place(place);
+        let place_ty = ref_p.ty;
+        let ref_p = self
+            .vcx
+            .maybe_apply_label(ref_p.expr.expect_predicate(), label);
+        let data = self.ty_use_impure(place_ty.ty);
+        let stmts_iter = data.expect_immref().init_bind_shadow(ref_p);
+        self.stmts(stmts_iter);
+    }
+
     pub(crate) fn unfold(&mut self, base: MaybeLabelledPlace<'vir>, label: Option<&'vir str>) {
         self.fold_or_unfold(base, FoldOrUnfold::Unfold, None, label);
     }
@@ -656,38 +677,13 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             {
                 comment!(self, "ADD: BORROW FLOW");
                 // TODO: What other conditions ^^^ ???
-                let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
-                    unreachable!();
-                };
-                let src = src.as_local_place().unwrap();
+                // let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
+                //     unreachable!();
+                // };
+                // let src = src.as_local_place().unwrap();
                 let dst = borrow_flow.short().base();
 
-                let ctxt = CompilerCtxt::new(self.body, self.vcx.tcx(), ());
-                let src_ty = src.ty(ctxt).ty;
-                let dst_ty = dst.ty(ctxt).ty;
-                if let ty::TyKind::Ref(_, _, ty::Mutability::Not) = dst_ty.kind() {
-                    // We don't want to undo the unsize operation for shared
-                    // references; the slice cannot have modified the array it
-                    // unsized.
-                    return Ok(());
-                }
-
-                let src_place = src.place();
-                let src_label = if let MaybeLabelledPlace::Labelled(snap) = src {
-                    Some(self.get_location_label(snap.at()))
-                } else {
-                    label.map(vir::OldLabel::Label)
-                };
-                let dst_place = dst.place();
-                let dst_label = if let MaybeLabelledPlace::Labelled(snap) = dst {
-                    Some(self.get_location_label(snap.at()))
-                } else {
-                    label.map(vir::OldLabel::Label)
-                };
-                let src_enc = self.encode_place(src_place).expr.expect_predicate();
-                let src_enc_old = self.vcx.maybe_apply_label(src_enc, src_label);
-                let dst_enc = self.encode_place(dst_place).expr.expect_predicate();
-                let dst_enc_old = self.vcx.maybe_apply_label(dst_enc, dst_label);
+                self.init_bind_shadow(dst, label);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
@@ -1719,6 +1715,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     )))));
                 }
                 mir::StatementKind::Assign(box (dest, rvalue)) => {
+                    tracing::debug!(?dest, ?rvalue, "Encoding Assignment");
                     // What are we assigning to?
                     let proj_enc = self
                         .encode_place(Place::from(*dest))
@@ -1735,8 +1732,10 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             let dest_ty_out = self.ty_use_impure(dest_ty.ty);
                             let method_assign_app =
                                 dest_ty_out.apply_method_assign(self.vcx, proj_enc, rval_enc.expr);
+                            let post_fold_stmts = rval_enc.post_fold_stmts(proj_enc);
+                            tracing::debug!(?method_assign_app, ?post_fold_stmts, ?proj_enc, ?dest_ty, "Encoding Assignment: apply method assign and post fold statements");
                             self.stmt(method_assign_app);
-                            self.stmts(rval_enc.post_fold_stmts(proj_enc));
+                            self.stmts(post_fold_stmts);
                         }
                         Err(_) => {
                             self.vcx.with_span(span, |vcx| {

@@ -58,6 +58,7 @@ pub struct TyImpureImmRefData<'vir> {
     /// the "shadow" Ref of the ImmRef takes its place. The original value is still needed
     /// in order to bind the shadow Ref, using [`bind_shared`].
     pub arbitrary_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
+    pub post_wand: &'vir vir::WandGenData<'vir, (), !>,
 }
 
 #[derive(Debug, Clone, Copy)]
