@@ -87,14 +87,10 @@ pub(crate) fn ty_impure<'vir>(
     builder.mk_snap_function(Some(vir::expr! { [ref_field](ref_self) }));
 
     // Methods
-    let ref_target = (shadow_ref)(ref_self);
-    let self_snap = (builder.ref_to_snap)(
-        ref_self,
-        builder.params.ty_exprs(),
-        builder.params.const_exprs(),
-    )
-    .downcast_ty();
-    let ref_source = vir::expr! { [data.1.deref_access](self_snap) };
+    let ref_target_decl = builder.vcx.mk_local_decl("target", vir::TYPE_REF);
+    let ref_target = builder.vcx.mk_local_ex(ref_target_decl);
+    let ref_source_decl = builder.vcx.mk_local_decl("source", vir::TYPE_REF);
+    let ref_source = builder.vcx.mk_local_ex(ref_source_decl);
     // `source.perm_field`. Beware! `old(source.perm_field)` (using this) is not the same as
     // `old(souce).perm_field`!
     let source_perm_field = builder.vcx.mk_field_expr(ref_source, perm_field);
@@ -142,7 +138,7 @@ pub(crate) fn ty_impure<'vir>(
             .downcast_ty(),
     ]);
     // 1/2 of source.perm_field
-    let half_source_perm = builder
+    let half_source_perm_field = builder
         .vcx
         .mk_bin_op_expr(
             vir::BinOpKind::DivRational,
@@ -158,31 +154,21 @@ pub(crate) fn ty_impure<'vir>(
         ref_source,
         builder.params.ty_exprs(),
         builder.params.const_exprs(),
-    )(Some(half_source_perm)));
+    )(Some(half_source_perm_field)));
 
     let target_param = builder.vcx.mk_predicate_app_expr((generic.ref_to_pred)(
         ref_target,
         builder.params.ty_exprs(),
         builder.params.const_exprs(),
-    )(Some(
-        builder.vcx.mk_field_expr(ref_target, perm_field),
-    )));
+    )(Some(target_perm_field)));
 
     let post_perm_field_value = builder.vcx.mk_conj(&[
-        builder.vcx.mk_eq_expr(
-            builder.vcx.mk_old_expr(half_source_perm),
-            old_source_new_perm_field,
-        ),
         builder
             .vcx
-            .mk_eq_expr(old_source_new_perm_field, target_perm_field),
+            .mk_eq_expr(builder.vcx.mk_old_expr(half_source_perm_field), source_perm_field),
+        builder.vcx.mk_eq_expr(source_perm_field, target_perm_field),
     ]);
-    let acc_immref_self = builder.vcx.mk_predicate_app_expr((builder.ref_to_pred)(
-        ref_self,
-        builder.params.ty_exprs(),
-        builder.params.const_exprs(),
-    )(None));
-    let post_new_snap_self = builder.vcx.mk_eq_expr(ref_source, (shadow_ref)(ref_self));
+    let post_new_snap_self = builder.vcx.mk_eq_expr(ref_source, (shadow_ref)(ref_target));
 
     // Wand to obtain back permission to original value.
     let post_wand = builder.vcx.mk_wand(
@@ -195,7 +181,7 @@ pub(crate) fn ty_impure<'vir>(
             builder.vcx.mk_old_expr(ref_source),
             builder.params.ty_exprs(),
             builder.params.const_exprs(),
-        )(Some(old_source_new_perm_field))),
+        )(Some(source_perm_field))),
     );
     let post_wand_expr = builder.vcx.mk_wand_expr(post_wand);
 
@@ -203,24 +189,24 @@ pub(crate) fn ty_impure<'vir>(
     let bind_shared = builder.inner.method(
         "bind_shared",
         (
-            ref_self.ty(),
+            ref_target.ty(),
+            ref_source.ty(),
             builder.params.ty_args(),
             builder.params.const_args(),
         ),
         &[],
         (
-            ref_self_decl,
+            ref_target_decl,
+            ref_source_decl,
             builder.params.ty_decls(),
             builder.params.const_decls(),
         ),
         &[
-            acc_immref_self,
             pre_acc_perm_field_source,
             perm_field_bounds,
             half_source_param,
         ],
         &[
-            acc_immref_self,
             post_new_snap_self,
             post_acc_perm_field_source,
             acc_perm_field_target,
@@ -235,7 +221,7 @@ pub(crate) fn ty_impure<'vir>(
         pure: data.1.clone(),
         perm_field,
         shadow_ref,
-        bind_shared,
+        bind_block: bind_shared,
         arbitrary_value,
         post_wand,
     })
