@@ -533,6 +533,13 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
     }
 
+    pub fn shadow_ref(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+    ) -> vir::ExprRef<'vir> {
+        (self.impure.shadow_ref)(self_ref)
+    }
+
     pub fn deref_perm_field_value(
         &self,
         self_ref: vir::ExprRef<'vir>,
@@ -574,13 +581,33 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         )
     }
 
-    pub(crate) fn init_bind_shadow(
+    /// Makes the target reference block the source reference.
+    /// This is used by immutable references, and usually `target` is `shadow(immref)`.
+    ///
+    /// # What it does
+    ///
+    /// It calls the `p_Ref_immutable_bind_block` method on `target` and `source`.
+    /// The result is that:
+    /// - Half of available access to generic predicate of `source` is handed over to `target`.
+    /// - To reverse this access transfer, a magic wand is ensured.
+    /// - The two references are now snapshot-equal.
+    ///
+    /// # Preconditions
+    ///
+    /// The caller must NOT:
+    /// - have any access to `target`'s perm field.
+    /// - have any access to either generic or concrete predicates on `target`.
+    ///
+    /// Essentially, `target` must be a previously-unused ref.
+    pub(crate) fn bind_block(
         &self,
-        lhs_place: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        target: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        source: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         let stmt: vir::Stmt<'_> = vir::with_vcx(|vcx| {
-            vcx.alloc(vir::StmtGenData::new(vcx.alloc((self.impure.bind_shared)(
-                lhs_place,
+            vcx.alloc(vir::StmtGenData::new(vcx.alloc((self.impure.bind_block)(
+                (self.impure.shadow_ref)(target),
+                source,
                 self.args.get_ty(),
                 self.args.get_const(),
             ))))

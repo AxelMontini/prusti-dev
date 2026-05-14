@@ -290,6 +290,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         span: Span,
     ) -> Result<EncodedRvalue<'vir>, EncodeRvalueError<'vir, E>> {
         let rvalue_ty = rvalue.ty(self.local_decls, self.vcx.tcx());
+        tracing::debug!(?rvalue_ty, ?rvalue, ?span, "Encode Rvalue");
         match rvalue {
             mir::Rvalue::Use(op) => Ok(self
                 .encode_operand_snap(op, &())
@@ -410,6 +411,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
             mir::Rvalue::Ref(_reg, _kind, place) => Ok(match rvalue_ty.kind() {
                 TyKind::Ref(.., ty::Mutability::Not) => {
+                    tracing::info!("BALLS2");
                     let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
                     let (place_expr, _, _, _) = self.encode_place_with_snap(Place::from(*place));
 
@@ -424,13 +426,13 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             // NOTE: `perm` parameter is ignored
                             let mut stmts = p_rvalue_ty.fold(
                                 None,
-                                lhs_place,
+                                place_ref,
                                 None,
-                                Some(inner.deref_perm_field_value(lhs_place, None)),
+                                Some(inner.deref_perm_field_value(place_ref, None)),
                                 None,
                             );
                             // Point &T to the "shadow" Ref, which gets bound to the original rhs Ref.
-                            stmts.extend(inner.init_bind_shadow(lhs_place));
+                            stmts.extend(inner.bind_block(lhs_place, place_ref));
                             stmts
                         })),
                     }
@@ -513,29 +515,44 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         Ok(new_stmts)
     }
 
-    pub(crate) fn init_bind_shadow(
+    pub(crate) fn init_bind_block(
         &mut self,
-        base: MaybeLabelledPlace<'vir>,
+        target_immref: MaybeLabelledPlace<'vir>,
+        source: MaybeLabelledPlace<'vir>,
         label: Option<&'vir str>,
     ) {
-        let place = base.place();
-        let label = match base {
+        let place_target = target_immref.place();
+        let label_target = match target_immref {
             MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
             _ => label.map(vir::OldLabel::Label),
         };
 
-        let ref_p = self.encode_place(place);
-        let place_ty = ref_p.ty;
-        let ref_p = self
+        let ref_p_target = self.encode_place(place_target);
+        let place_ty_target = ref_p_target.ty;
+        let ref_p_target = self
             .vcx
-            .maybe_apply_label(ref_p.expr.expect_predicate(), label);
-        let data = self.ty_use_impure(place_ty.ty);
-        let stmts_iter = data.expect_immref().init_bind_shadow(ref_p);
+            .maybe_apply_label(ref_p_target.expr.expect_predicate(), label_target);
+        let data = self.ty_use_impure(place_ty_target.ty).expect_immref();
+        let place_source = source.place();
+        let label_source = match source {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p_source = self.encode_place(place_source);
+        let ref_p_source = self
+            .vcx
+            .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
+        let stmts_iter = data.bind_block(ref_p_target, ref_p_source);
         self.stmts(stmts_iter);
     }
 
     pub(crate) fn unfold(&mut self, base: MaybeLabelledPlace<'vir>, label: Option<&'vir str>) {
         self.fold_or_unfold(base, FoldOrUnfold::Unfold, None, label);
+    }
+
+    pub(crate) fn fold(&mut self, base: MaybeLabelledPlace<'vir>, label: Option<&'vir str>) {
+        self.fold_or_unfold(base, FoldOrUnfold::Fold, None, label);
     }
 
     pub(crate) fn fold_or_unfold(
@@ -668,13 +685,13 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             {
                 comment!(self, "ADD: BORROW FLOW");
                 // TODO: What other conditions ^^^ ???
-                // let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
-                //     unreachable!();
-                // };
-                // let src = src.as_local_place().unwrap();
+                let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
+                    unreachable!();
+                };
+                let src = src.as_local_place().unwrap();
                 let dst = borrow_flow.short().base();
-
-                self.init_bind_shadow(dst, label);
+                self.fold(src, label);
+                self.init_bind_block(dst, src, label);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()

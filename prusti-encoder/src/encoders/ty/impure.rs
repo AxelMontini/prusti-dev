@@ -52,7 +52,7 @@ pub struct TyImpureImmRefData<'vir> {
     /// Halves `source.perm_field`, takes away that amount of access from `p_Param(source, ...)` and
     /// gives the same amount to `p_Param(target, ...)`. Also ensures snapshot equality between
     /// `target` and `source`.
-    pub bind_shared: vir::MethodIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
+    pub bind_block: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
     /// Creates a snapshot type set to the given Ref. It's used only during
     /// the initial step of an ImmRef assignment. The value is then unset from the ref, and instead
     /// the "shadow" Ref of the ImmRef takes its place. The original value is still needed
