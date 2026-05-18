@@ -42,10 +42,6 @@ pub type TyImpureBuiltin<'vir> = <ImpureTyDatas as TyDatas<'vir>>::BuiltinData;
 #[derive(Debug, Clone, Copy)]
 pub struct TyImpureImmRefData<'vir> {
     pub pure: <PureTyDatas as TyDatas<'vir>>::ImmRefData,
-    /// Each ImmRef maps to a certain viper Ref. This is NOT the original value that was borrowed.
-    /// Instead, each time an ImmRef `y` is created, it points to `p_Ref_immutable_shared(y)`.
-    /// Then, after an assignment, this Ref is `shared from` the original one by using [`Self::bind_shared`]
-    pub shadow_ref: FunctionIdn<'vir, vir::Ref, vir::Ref>,
     pub perm_field: vir::FieldPerm<'vir>,
     /// Args: `(target, source, ...generics)`
     ///
@@ -53,12 +49,17 @@ pub struct TyImpureImmRefData<'vir> {
     /// gives the same amount to `p_Param(target, ...)`. Also ensures snapshot equality between
     /// `target` and `source`.
     pub bind_block: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
+    /// Args: `(target, source, ...generics)`
+    ///
+    /// Reverses `bind_block`. It requires the same wand ensured when binding,
+    /// and transfers permissions back to source. It also adds the permission field of `target` to `source`,
+    /// and removes all access to the target perm field.
+    pub unbind_unblock: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
     /// Creates a snapshot type set to the given Ref. It's used only during
     /// the initial step of an ImmRef assignment. The value is then unset from the ref, and instead
     /// the "shadow" Ref of the ImmRef takes its place. The original value is still needed
     /// in order to bind the shadow Ref, using [`bind_shared`].
     pub arbitrary_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
-    pub post_wand: &'vir vir::WandGenData<'vir, (), !>,
 }
 
 #[derive(Debug, Clone, Copy)]

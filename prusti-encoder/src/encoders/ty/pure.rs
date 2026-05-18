@@ -126,10 +126,14 @@ impl<'vir, D: TyDatas<'vir, PrimitiveData = TyPurePrimData<'vir>>> TyData<'vir, 
 pub struct TyPureImmRefData<'vir> {
     /// Construct domain from a `Ref` value.
     pub(super) prim_to_snap: FunctionIdn<'vir, (vir::Ref, vir::PSnap), vir::CSnap>,
-    /// Function to access the referee.
+    /// Function to access the shadow referee.
     pub(super) deref_access: AdtDestructor<'vir, vir::CSnap, vir::Ref>,
     /// Function to access the snapshot value.
     pub(super) value_access: AdtDestructor<'vir, vir::CSnap, vir::PSnap>,
+    /// Each ImmRef maps to a certain viper Ref. This is NOT the original value that was borrowed.
+    /// Instead, each time an ImmRef `y` is created, it points to `p_Ref_immutable_shared(y)`.
+    /// Then, after an assignment, this Ref is `shared from` the original one by using [`Self::bind_shared`]
+    pub(super) shadow_ref: FunctionIdn<'vir, vir::Ref, vir::Ref>,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -850,11 +850,18 @@ impl<'vir: 'enc, 'enc> Enc<'vir, 'enc> {
                         .upcast_ty())
                 } else {
                     let e_rvalue_ty = rvalue_snapshot_encoding.expect_immref();
-                    // For shared borrows we want to use just the snapshot
-                    // without the reference so that snapshot equality compares
-                    // only values.
+                    // TODO: Do we? Shouldn't this be on-par with mutref now?
+                    // // For shared borrows we want to use just the snapshot
+                    // // without the reference so that snapshot equality compares
+                    // // only values.
+                    // Ok(e_rvalue_ty
+                    //     .prim_to_snap(self.vcx.mk_null().lazy(), encoded_place.snap)
+                    //     .upcast_ty())
+                    let place_ref = encoded_place
+                        .place_ref
+                        .unwrap_or_else(|| self.vcx.mk_null().lazy());
                     Ok(e_rvalue_ty
-                        .prim_to_snap(self.vcx.mk_null().lazy(), encoded_place.snap)
+                        .prim_to_snap(place_ref, encoded_place.snap)
                         .upcast_ty())
                 }
             }

@@ -290,8 +290,32 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         span: Span,
     ) -> Result<EncodedRvalue<'vir>, EncodeRvalueError<'vir, E>> {
         let rvalue_ty = rvalue.ty(self.local_decls, self.vcx.tcx());
+        let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
         tracing::debug!(?rvalue_ty, ?rvalue, ?span, "Encode Rvalue");
         match rvalue {
+            // Copying immutable references is a special case: permissions must be split,
+            // and a new shadow ref must be used for the new reference, and it must be bound
+            // to the old ref's shadow (this must be set in the snapshot of the new ref aswell).
+            // TODO: Is this always correct? Can a ref be passed to a function by copy and not by
+            // move? (usually args are explicitly copied beforehand, so I hope not).
+            mir::Rvalue::Use(mir::Operand::Copy(place))
+                if matches!(p_rvalue_ty.specifics, encoders::ty::TySpecifics::ImmRef(_)) =>
+            {
+                let place_expr = self.encode_place_with_snap((*place).into()).0;
+                let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
+                let inner = p_rvalue_ty.expect_immref();
+                let place_ref = place_expr.expr.address;
+
+                Ok(EncodedRvalue {
+                    expr: inner
+                        .prim_to_snap_assign(inner.deref_shadow(place_ref, None))
+                        .upcast_ty(),
+                    // post_assign_folds: Some(Box::new(move |lhs_place| {
+                    //     inner.bind_block(lhs_place, place_ref).collect()
+                    // })),
+                    post_assign_folds: None,
+                })
+            }
             mir::Rvalue::Use(op) => Ok(self
                 .encode_operand_snap(op, &())
                 .map_err(EncodeRvalueError::from)?
@@ -411,29 +435,27 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
             mir::Rvalue::Ref(_reg, _kind, place) => Ok(match rvalue_ty.kind() {
                 TyKind::Ref(.., ty::Mutability::Not) => {
-                    tracing::info!("BALLS2");
                     let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
                     let (place_expr, _, _, _) = self.encode_place_with_snap(Place::from(*place));
 
                     let inner = p_rvalue_ty.expect_immref();
                     let place_ref = place_expr.expr.address;
+
                     EncodedRvalue {
-                        expr: inner.prim_to_snap_assign(place_ref).upcast_ty(),
+                        expr: inner.prim_to_snap_assign(place_ref).upcast_ty(), // TODO: This should
+                        // assign
+                        // shadow(LHS)
                         post_assign_folds: Some(Box::new(move |lhs_place| {
                             // Before sharing the original ref and binding it to the shadow ref, we
                             // must have `acc(p_Param(rhs, ty), rhs.perm_field)`. It then gets
                             // halved by binding.
                             // NOTE: `perm` parameter is ignored
-                            let mut stmts = p_rvalue_ty.fold(
-                                None,
-                                place_ref,
-                                None,
-                                Some(inner.deref_perm_field_value(place_ref, None)),
-                                None,
-                            );
+                            let stmts = inner.fold_actual(lhs_place, None, None).into_iter();
                             // Point &T to the "shadow" Ref, which gets bound to the original rhs Ref.
-                            stmts.extend(inner.bind_block(lhs_place, place_ref));
-                            stmts
+                            let stmts = stmts.chain(
+                                inner.bind_block(inner.deref_shadow(lhs_place, None), place_ref),
+                            );
+                            stmts.collect()
                         })),
                     }
                 }
@@ -515,7 +537,44 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         Ok(new_stmts)
     }
 
-    pub(crate) fn init_bind_block(
+    pub(crate) fn unbind_unblock_refs(
+        &mut self,
+        target_immref: MaybeLabelledPlace<'vir>,
+        source_immref: MaybeLabelledPlace<'vir>,
+        label: Option<&'vir str>,
+    ) {
+        let place_target = target_immref.place();
+        let label_target = match target_immref {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p_target = self.encode_place(place_target);
+        let place_ty_target = ref_p_target.ty;
+        let ref_p_target = self
+            .vcx
+            .maybe_apply_label(ref_p_target.expr.expect_predicate(), label_target);
+        let data = self.ty_use_impure(place_ty_target.ty).expect_immref();
+        let place_source = source_immref.place();
+        let label_source = match source_immref {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p_source = self.encode_place(place_source);
+        let ref_p_source = self
+            .vcx
+            .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
+        // TODO: Label?
+        let stmts_iter = data.unbind_unblock_refs(
+            ref_p_target,
+            ref_p_source,
+            None,
+        );
+        self.stmts(stmts_iter);
+    }
+
+    pub(crate) fn unbind_unblock(
         &mut self,
         target_immref: MaybeLabelledPlace<'vir>,
         source: MaybeLabelledPlace<'vir>,
@@ -543,7 +602,42 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         let ref_p_source = self
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
-        let stmts_iter = data.bind_block(ref_p_target, ref_p_source);
+        // TODO: Label?
+        let stmts_iter = data.unbind_unblock(data.deref_shadow(ref_p_target, None), ref_p_source);
+        self.stmts(stmts_iter);
+    }
+
+    /// Binds the shadow of `target_immref` to the shadow of `source_immref`.
+    /// Calls [`TyUseImpureImmRef::bind_block_refs`] under the hood.
+    pub(crate) fn bind_block_refs(
+        &mut self,
+        target_immref: MaybeLabelledPlace<'vir>,
+        source_immref: MaybeLabelledPlace<'vir>,
+        label: Option<&'vir str>,
+    ) {
+        let place_target = target_immref.place();
+        let label_target = match target_immref {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p_target = self.encode_place(place_target);
+        let place_ty_target = ref_p_target.ty;
+        let ref_p_target = self
+            .vcx
+            .maybe_apply_label(ref_p_target.expr.expect_predicate(), label_target);
+        let data = self.ty_use_impure(place_ty_target.ty).expect_immref();
+        let place_source = source_immref.place();
+        let label_source = match source_immref {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p_source = self.encode_place(place_source);
+        let ref_p_source = self
+            .vcx
+            .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
+        let stmts_iter = data.bind_block_refs(ref_p_target, ref_p_source, None); // TODO: Label?
         self.stmts(stmts_iter);
     }
 
@@ -674,24 +768,51 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
     ) -> EncodeResult<'vir, (), E> {
         match edge.kind() {
             BorrowPcgEdgeKind::Borrow(borrow) if borrow.is_mut() && edge_action.is_remove() => {
-                // For a borrow e.g. let x = &mut y; the capability to `y` is
+                // For a borrow e.g. `let x = &mut y;` the capability to `y` is
                 // folded into the Rvalue `&mut y` that is stored in `x`. This
                 // reverses that effect
                 self.unfold(borrow.assigned_ref(), label);
             }
+            BorrowPcgEdgeKind::Borrow(borrow) if !borrow.is_mut() && edge_action.is_remove() => {
+                // For an immutable borrow e.g. `let x = &y;` the capability to `y` is
+                // folded into the Rvalue `&mut y` that is stored in `x`.
+                // We must unfold it AFTER unbinding with the magic wand.
+                // TODO: UNBIND ref
+                self.unbind_unblock(borrow.assigned_ref(), borrow.blocked_place(), label);
+                // TODO: HOW TO ACCESS PERM FIELD IN THIS UNFOLD?
+                self.unfold(borrow.blocked_place(), label);
+            }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_add()
-                    && let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind() =>
+                    && let BorrowFlowEdgeKind::Assignment(_assignment_data) =
+                        borrow_flow.kind() =>
             {
-                comment!(self, "ADD: BORROW FLOW");
                 // TODO: What other conditions ^^^ ???
                 let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
                     unreachable!();
                 };
+                // src is an immref. It must be dereferenced (shadow) before binding.
                 let src = src.as_local_place().unwrap();
                 let dst = borrow_flow.short().base();
-                self.fold(src, label);
-                self.init_bind_block(dst, src, label);
+                // self.fold(src, label); // not needed, if behind a ref (borrowflow) it's already
+                // generic
+                self.bind_block_refs(dst, src, label);
+            }
+            BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
+                if edge_action.is_remove()
+                    && let BorrowFlowEdgeKind::Assignment(_assignment_data) =
+                        borrow_flow.kind() =>
+            {
+                // TODO: What other conditions ^^^ ???
+                let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
+                    unreachable!();
+                };
+                // src is an immref. It must be dereferenced (shadow) before binding.
+                let src = src.as_local_place().unwrap();
+                let dst = borrow_flow.short().base();
+                // self.fold(src, label); // not needed, if behind a ref (borrowflow) it's already
+                // generic
+                self.unbind_unblock_refs(dst, src, label);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
@@ -851,9 +972,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             }
             other => comment!(self, "(ignoring) {edge_action:?} {other:?}"),
         }
+        let edge_name = match edge.kind() {
+            BorrowPcgEdgeKind::Borrow(..) => "borrow",
+            BorrowPcgEdgeKind::BorrowPcgExpansion(..) => "borrow_expansion",
+            BorrowPcgEdgeKind::Deref(..) => "deref",
+            BorrowPcgEdgeKind::Abstraction(..) => "abstraction",
+            BorrowPcgEdgeKind::BorrowFlow(..) => "borrow_flow",
+            BorrowPcgEdgeKind::Coupled(..) => "coupled",
+        };
         comment!(
             self,
-            "(PCG) handled edge {edge_action:?}: {}",
+            "(PCG) handled edge {edge_name}: {edge_action:?}: {}",
             edge.to_short_string(self.pcg_ctxt())
         );
         Ok(())
@@ -1210,7 +1339,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                         }
                     }
                     ty::TyKind::Ref(_, _, ty::Mutability::Not) => PlaceExpr {
-                        address: e_ty.expect_immref().deref(expr.address, None),
+                        address: e_ty.expect_immref().deref_shadow(expr.address, None),
                         snap: None,
                     },
                     ty::TyKind::Ref(_, _, ty::Mutability::Mut) => PlaceExpr {
@@ -1427,6 +1556,11 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                         generics.const_exprs(),
                     )))));
                 }
+                // // Assignment case for immrefs is special: instead of assigning the right value,
+                // // it must assign the shadow of the ref itself.
+                // mir::StatementKind::Assign(box (dest, mir::Rvalue::Ref(_region, _kind, _place))) => {
+                //
+                // },
                 mir::StatementKind::Assign(box (dest, rvalue)) => {
                     tracing::debug!(?dest, ?rvalue, "Encoding Assignment");
                     // What are we assigning to?
