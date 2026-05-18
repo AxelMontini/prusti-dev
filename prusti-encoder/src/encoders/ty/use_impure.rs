@@ -1,6 +1,6 @@
 use prusti_rustc_interface::abi;
 use task_encoder::{EncodeFullResult, TaskEncoder, TaskEncoderDependencies};
-use vir::{CastType, PredicateIdn};
+use vir::{CastType, ExprRef, PredicateIdn};
 
 use crate::encoders::{
     Impure,
@@ -361,7 +361,10 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                     })])
                     .collect()
             }
-            TySpecifics::ImmRef(data) => data.fold(self_ref, label, perm).into_iter().collect(),
+            TySpecifics::ImmRef(data) => data
+                .fold_shadow(self_ref, label, perm)
+                .into_iter()
+                .collect(),
             TySpecifics::MutRef(data) => data.fold(self_ref, label).into_iter().collect(),
             TySpecifics::StructLike(data) => data.fold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -412,7 +415,10 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                 )
                 .collect()
             }
-            TySpecifics::ImmRef(data) => data.unfold(self_ref, old, perm).into_iter().collect(),
+            TySpecifics::ImmRef(data) => data
+                .unfold_shadow(self_ref, old, perm)
+                .into_iter()
+                .collect(),
             TySpecifics::MutRef(data) => data.unfold(self_ref, old).into_iter().collect(),
             TySpecifics::StructLike(data) => data.unfold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -522,30 +528,41 @@ impl<'vir> TyUseImpureEnum<'vir> {
 }
 
 impl<'vir> TyUseImpureImmRef<'vir> {
-    pub fn deref(
+    pub fn deref_shadow(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprRef<'vir> {
+        let deref = self.impure.pure.shadow_ref.call()(self_ref);
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
+    }
+
+    pub fn deref_actual(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> ExprRef<'vir> {
         let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
             .downcast_ty();
         let deref = self.impure.pure.deref_access.call()(snap);
         vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
     }
 
-    pub fn shadow_ref(
-        &self,
-        self_ref: vir::ExprRef<'vir>,
-    ) -> vir::ExprRef<'vir> {
-        (self.impure.shadow_ref)(self_ref)
-    }
-
-    pub fn deref_perm_field_value(
+    pub fn deref_shadow_perm_field(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprPerm<'vir> {
-        let deref = self.deref(self_ref, label);
+        let deref = self.deref_shadow(self_ref, label);
+        vir::with_vcx(|vcx| vcx.mk_field_expr(deref, self.impure.perm_field))
+    }
+
+    pub fn deref_actual_perm_field(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> vir::ExprPerm<'vir> {
+        let deref = self.deref_actual(self_ref, label);
         vir::with_vcx(|vcx| vcx.mk_field_expr(deref, self.impure.perm_field))
     }
 
@@ -554,7 +571,7 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     }
 
     /// If [`perm`] is `None`, then the value of the perm field is used.
-    fn fold(
+    fn fold_shadow(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
@@ -562,13 +579,27 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> Option<vir::Stmt<'vir>> {
         // TODO: Cast the available amount only, using the perm field.
         self.caster.partial_cast_to_callee_ctx(
-            self.deref(self_ref, label),
-            perm.unwrap_or_else(|| self.deref_perm_field_value(self_ref, label)),
+            self.deref_shadow(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_shadow_perm_field(self_ref, label)),
         )
     }
 
     /// If [`perm`] is `None`, then the value of the perm field is used.
-    fn unfold(
+    pub(crate) fn fold_actual(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> Option<vir::Stmt<'vir>> {
+        // TODO: Cast the available amount only, using the perm field.
+        self.caster.partial_cast_to_callee_ctx(
+            self.deref_actual(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_actual_perm_field(self_ref, label)),
+        )
+    }
+
+    /// If [`perm`] is `None`, then the value of the perm field is used.
+    fn unfold_shadow(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
@@ -576,29 +607,14 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> Option<vir::Stmt<'vir>> {
         // TODO: Cast the available amount only, using the perm field.
         self.caster.partial_cast_to_caller_ctx(
-            self.deref(self_ref, label),
-            perm.unwrap_or_else(|| self.deref_perm_field_value(self_ref, label)),
+            self.deref_shadow(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_shadow_perm_field(self_ref, label)),
         )
     }
 
+    /// Binds the `source` to `target`.
     /// Makes the target reference block the source reference.
     /// This is used by immutable references, and usually `target` is `shadow(immref)`.
-    ///
-    /// # What it does
-    ///
-    /// It calls the `p_Ref_immutable_bind_block` method on `target` and `source`.
-    /// The result is that:
-    /// - Half of available access to generic predicate of `source` is handed over to `target`.
-    /// - To reverse this access transfer, a magic wand is ensured.
-    /// - The two references are now snapshot-equal.
-    ///
-    /// # Preconditions
-    ///
-    /// The caller must NOT:
-    /// - have any access to `target`'s perm field.
-    /// - have any access to either generic or concrete predicates on `target`.
-    ///
-    /// Essentially, `target` must be a previously-unused ref.
     pub(crate) fn bind_block(
         &self,
         target: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
@@ -606,13 +622,52 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         let stmt: vir::Stmt<'_> = vir::with_vcx(|vcx| {
             vcx.alloc(vir::StmtGenData::new(vcx.alloc((self.impure.bind_block)(
-                (self.impure.shadow_ref)(target),
+                target,
                 source,
                 self.args.get_ty(),
                 self.args.get_const(),
             ))))
         });
         Some(stmt).into_iter()
+    }
+
+    /// Same as [`bind_block`], but both `source` and `target` are immrefs.
+    /// It binds the shadow of `source` and the shadow of `target`.
+    pub(crate) fn bind_block_refs(
+        &self,
+        target_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        source_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+        self.bind_block(self.deref_shadow(target_immref, label), self.deref_shadow(source_immref, label))
+    }
+
+    pub(crate) fn unbind_unblock_refs(
+        &self,
+        target_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        source_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+        self.unbind_unblock(self.deref_shadow(target_immref, label), self.deref_shadow(source_immref, label))
+    }
+
+    pub(crate) fn unbind_unblock(
+        &self,
+        target: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+        source: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+        Some(vir::with_vcx(|vcx| {
+            vcx.alloc(vir::StmtGenData::new(vcx.alloc(self
+                .impure
+                .unbind_unblock
+                .call()(
+                target,
+                source,
+                self.args.get_ty(),
+                self.args.get_const(),
+            ))))
+        }))
+        .into_iter()
     }
 }
 
