@@ -575,19 +575,18 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
         // TODO: Label?
-        let stmts_iter = data.unbind_unblock_refs(
-            ref_p_target,
-            ref_p_source,
-            None,
-        );
+        let stmts_iter = data.unbind_unblock_refs(ref_p_target, ref_p_source, None);
         self.stmts(stmts_iter);
     }
 
+    /// Unbind a ref's shadow and unblock the source.
+    /// Optionally concretize the source too, based on its perm field value.
     pub(crate) fn unbind_unblock(
         &mut self,
         target_immref: MaybeLabelledPlace<'vir>,
         source: MaybeLabelledPlace<'vir>,
         label: Option<&'vir str>,
+        concretize: bool,
     ) {
         let place_target = target_immref.place();
         let label_target = match target_immref {
@@ -611,8 +610,12 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         let ref_p_source = self
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
+
+        let concretize = concretize.then(|| data.unfold_actual(ref_p_target, None, None)).flatten();
         // TODO: Label?
-        let stmts_iter = data.unbind_unblock(data.deref_shadow(ref_p_target, None), ref_p_source);
+        let stmts_iter = data
+            .unbind_unblock(data.deref_shadow(ref_p_target, None), ref_p_source)
+            .chain(concretize);
         self.stmts(stmts_iter);
     }
 
@@ -786,10 +789,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 // For an immutable borrow e.g. `let x = &y;` the capability to `y` is
                 // folded into the Rvalue `&mut y` that is stored in `x`.
                 // We must unfold it AFTER unbinding with the magic wand.
-                // TODO: UNBIND ref
-                self.unbind_unblock(borrow.assigned_ref(), borrow.blocked_place(), label);
-                // TODO: HOW TO ACCESS PERM FIELD IN THIS UNFOLD?
-                self.unfold(borrow.blocked_place(), label);
+                self.unbind_unblock(borrow.assigned_ref(), borrow.blocked_place(), label, true);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_add()
@@ -822,6 +822,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 // self.fold(src, label); // not needed, if behind a ref (borrowflow) it's already
                 // generic
                 self.unbind_unblock_refs(dst, src, label);
+                // TODO: Exhale ref
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()

@@ -612,6 +612,20 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         )
     }
 
+    /// If [`perm`] is `None`, then the value of the perm field is used.
+    pub(crate) fn unfold_actual(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> Option<vir::Stmt<'vir>> {
+        // TODO: Cast the available amount only, using the perm field.
+        self.caster.partial_cast_to_caller_ctx(
+            self.deref_actual(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_actual_perm_field(self_ref, label)),
+        )
+    }
+
     /// Binds the `source` to `target`.
     /// Makes the target reference block the source reference.
     /// This is used by immutable references, and usually `target` is `shadow(immref)`.
