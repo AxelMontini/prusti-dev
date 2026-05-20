@@ -611,7 +611,9 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
 
-        let concretize = concretize.then(|| data.unfold_actual(ref_p_target, None, None)).flatten();
+        let concretize = concretize
+            .then(|| data.unfold_actual(ref_p_target, None, None))
+            .flatten();
         // TODO: Label?
         let stmts_iter = data
             .unbind_unblock(data.deref_shadow(ref_p_target, None), ref_p_source)
@@ -822,7 +824,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 // self.fold(src, label); // not needed, if behind a ref (borrowflow) it's already
                 // generic
                 self.unbind_unblock_refs(dst, src, label);
-                // TODO: Exhale ref
+                let dst_ty = dst.ty(self.pcg_ctxt());
+                assert!(dst_ty.variant_index.is_none());
+                let dst_ty_out = self.ty_use_impure(dst_ty.ty);
+
+                let dst_enc = self.encode_place(dst.place());
+                comment!(self, "exhale due to removal of BorrowFlow");
+                self.stmt(self.vcx.mk_exhale_stmt(dst_ty_out.ref_to_pred(
+                    self.vcx,
+                    dst_enc.expr.expect_predicate(),
+                    None,
+                )));
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()

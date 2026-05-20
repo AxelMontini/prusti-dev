@@ -126,9 +126,10 @@ impl ConstData {
         match self {
             ConstData::Bool(_) => crate::TYPE_BOOL.upcast_ty(),
             ConstData::Int(_) => crate::TYPE_INT.upcast_ty(),
-            ConstData::Wildcard | ConstData::FullPerm | ConstData::NoPerm | ConstData::Perm(_, _) => {
-                crate::TYPE_PERM.upcast_ty()
-            }
+            ConstData::Wildcard
+            | ConstData::FullPerm
+            | ConstData::NoPerm
+            | ConstData::Perm(_, _) => crate::TYPE_PERM.upcast_ty(),
             ConstData::Null => crate::TYPE_REF.upcast_ty(),
         }
     }

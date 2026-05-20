@@ -653,7 +653,10 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         source_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
-        self.bind_block(self.deref_shadow(target_immref, label), self.deref_shadow(source_immref, label))
+        self.bind_block(
+            self.deref_shadow(target_immref, label),
+            self.deref_shadow(source_immref, label),
+        )
     }
 
     pub(crate) fn unbind_unblock_refs(
@@ -662,7 +665,10 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         source_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
-        self.unbind_unblock(self.deref_shadow(target_immref, label), self.deref_shadow(source_immref, label))
+        self.unbind_unblock(
+            self.deref_shadow(target_immref, label),
+            self.deref_shadow(source_immref, label),
+        )
     }
 
     pub(crate) fn unbind_unblock(
@@ -671,15 +677,14 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         source: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         Some(vir::with_vcx(|vcx| {
-            vcx.alloc(vir::StmtGenData::new(vcx.alloc(self
-                .impure
-                .unbind_unblock
-                .call()(
-                target,
-                source,
-                self.args.get_ty(),
-                self.args.get_const(),
-            ))))
+            vcx.alloc(vir::StmtGenData::new(vcx.alloc(
+                self.impure.unbind_unblock.call()(
+                    target,
+                    source,
+                    self.args.get_ty(),
+                    self.args.get_const(),
+                ),
+            )))
         }))
         .into_iter()
     }
