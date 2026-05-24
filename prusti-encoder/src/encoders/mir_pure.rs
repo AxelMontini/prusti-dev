@@ -860,8 +860,10 @@ impl<'vir: 'enc, 'enc> Enc<'vir, 'enc> {
                     let place_ref = encoded_place
                         .place_ref
                         .unwrap_or_else(|| self.vcx.mk_null().lazy());
+                    // Shadow can be whatever I guess?
+                    // TODO: Does setting the shadow to null make sense?
                     Ok(e_rvalue_ty
-                        .prim_to_snap(place_ref, encoded_place.snap)
+                        .prim_to_snap(self.vcx.mk_null().lazy(), place_ref, encoded_place.snap)
                         .upcast_ty())
                 }
             }

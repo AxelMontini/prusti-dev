@@ -528,46 +528,56 @@ impl<'vir> TyUseImpureEnum<'vir> {
 }
 
 impl<'vir> TyUseImpureImmRef<'vir> {
-    pub fn deref_shadow(
+    pub fn deref_access(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprRef<'vir> {
-        let deref = self.impure.pure.shadow_ref.call()(self_ref);
-        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
-    }
-
-    pub fn deref_actual(
-        &self,
-        self_ref: vir::ExprRef<'vir>,
-        label: Option<vir::OldLabel<'vir>>,
-    ) -> ExprRef<'vir> {
         let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
             .downcast_ty();
         let deref = self.impure.pure.deref_access.call()(snap);
         vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
     }
 
-    pub fn deref_shadow_perm_field(
+    pub fn blocked_access(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> ExprRef<'vir> {
+        let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
+            .downcast_ty();
+        let deref = self.impure.pure.blocked_access.call()(snap);
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
+    }
+
+    pub fn perm_field(&self, self_ref: vir::ExprRef<'vir>) -> vir::ExprPerm<'vir> {
+        vir::with_vcx(|vcx| vcx.mk_field_expr(self_ref, self.impure.perm_field))
+    }
+
+    pub fn deref_perm_field(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprPerm<'vir> {
-        let deref = self.deref_shadow(self_ref, label);
-        vir::with_vcx(|vcx| vcx.mk_field_expr(deref, self.impure.perm_field))
+        let deref = self.deref_access(self_ref, label);
+        self.perm_field(deref)
     }
 
-    pub fn deref_actual_perm_field(
+    pub fn blocked_perm_field(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprPerm<'vir> {
-        let deref = self.deref_actual(self_ref, label);
-        vir::with_vcx(|vcx| vcx.mk_field_expr(deref, self.impure.perm_field))
+        let deref = self.blocked_access(self_ref, label);
+        self.perm_field(deref)
     }
 
-    pub fn prim_to_snap_assign(&self, self_ref: vir::ExprRef<'vir>) -> vir::ExprCSnap<'vir> {
-        (self.impure.arbitrary_value)(self_ref)
+    pub fn prim_to_snap_assign(
+        &self,
+        blocked_ref: vir::ExprRef<'vir>,
+        perm: vir::ExprPerm<'vir>,
+    ) -> vir::ExprCSnap<'vir> {
+        (self.impure.arbitrary_value)(blocked_ref, perm)
     }
 
     /// If [`perm`] is `None`, then the value of the perm field is used.
@@ -579,8 +589,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> Option<vir::Stmt<'vir>> {
         // TODO: Cast the available amount only, using the perm field.
         self.caster.partial_cast_to_callee_ctx(
-            self.deref_shadow(self_ref, label),
-            perm.unwrap_or_else(|| self.deref_shadow_perm_field(self_ref, label)),
+            self.deref_access(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_perm_field(self_ref, label)),
         )
     }
 
@@ -593,8 +603,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> Option<vir::Stmt<'vir>> {
         // TODO: Cast the available amount only, using the perm field.
         self.caster.partial_cast_to_callee_ctx(
-            self.deref_actual(self_ref, label),
-            perm.unwrap_or_else(|| self.deref_actual_perm_field(self_ref, label)),
+            self.blocked_access(self_ref, label),
+            perm.unwrap_or_else(|| self.blocked_perm_field(self_ref, label)),
         )
     }
 
@@ -607,8 +617,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> Option<vir::Stmt<'vir>> {
         // TODO: Cast the available amount only, using the perm field.
         self.caster.partial_cast_to_caller_ctx(
-            self.deref_shadow(self_ref, label),
-            perm.unwrap_or_else(|| self.deref_shadow_perm_field(self_ref, label)),
+            self.deref_access(self_ref, label),
+            perm.unwrap_or_else(|| self.deref_perm_field(self_ref, label)),
         )
     }
 
@@ -621,9 +631,22 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> Option<vir::Stmt<'vir>> {
         // TODO: Cast the available amount only, using the perm field.
         self.caster.partial_cast_to_caller_ctx(
-            self.deref_actual(self_ref, label),
-            perm.unwrap_or_else(|| self.deref_actual_perm_field(self_ref, label)),
+            self.blocked_access(self_ref, label),
+            perm.unwrap_or_else(|| self.blocked_perm_field(self_ref, label)),
         )
+    }
+
+    /// Calls `shadow_for(blocked, perm)`, substituting perm with `blocked.perm_field` if `perm` is
+    /// `None`.
+    pub(crate) fn shadow_for(
+        &self,
+        blocked: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> vir::ExprRef<'vir> {
+        vir::with_vcx(|vcx| {
+            let perm = perm.unwrap_or_else(|| vcx.mk_field_expr(blocked, self.impure.perm_field));
+            self.impure.pure.shadow_for.call()(blocked, perm)
+        })
     }
 
     /// Binds the `source` to `target`.
@@ -654,8 +677,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         label: Option<vir::OldLabel<'vir>>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         self.bind_block(
-            self.deref_shadow(target_immref, label),
-            self.deref_shadow(source_immref, label),
+            self.deref_access(target_immref, label),
+            self.deref_access(source_immref, label),
         )
     }
 
@@ -666,8 +689,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         label: Option<vir::OldLabel<'vir>>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         self.unbind_unblock(
-            self.deref_shadow(target_immref, label),
-            self.deref_shadow(source_immref, label),
+            self.deref_access(target_immref, label),
+            self.deref_access(source_immref, label),
         )
     }
 

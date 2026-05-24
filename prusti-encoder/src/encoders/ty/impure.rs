@@ -56,10 +56,11 @@ pub struct TyImpureImmRefData<'vir> {
     /// and removes all access to the target perm field.
     pub unbind_unblock: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
     /// Creates a snapshot type set to the given Ref. It's used only during
-    /// the initial step of an ImmRef assignment. The value is then unset from the ref, and instead
-    /// the "shadow" Ref of the ImmRef takes its place. The original value is still needed
-    /// in order to bind the shadow Ref, using [`bind_shared`].
-    pub arbitrary_value: vir::FunctionIdn<'vir, vir::Ref, vir::CSnap>,
+    /// the initial step of an ImmRef assignment.
+    /// Args: `blocked_place`, `shadow_place`
+    pub arbitrary_value: vir::FunctionIdn<'vir, (vir::Ref, vir::Perm), vir::CSnap>,
+    /// Returns a new fresh shadow based on the value of the old one.
+    pub refresh_next_shadow: vir::FunctionIdn<'vir, vir::Ref, vir::Ref>,
 }
 
 #[derive(Debug, Clone, Copy)]
