@@ -181,6 +181,7 @@ where
     pub current_terminator: Option<vir::TerminatorStmt<'vir>>,
 
     pub encoded_blocks: Vec<vir::CfgBlock<'vir>>, // TODO: use IndexVec ?
+    pub next_shadow_decl: Option<&'vir LocalDeclData<'vir, vir::Ref>>,
 }
 
 /// Represents the translation of a MIR place. If the place crosses a shared
@@ -297,10 +298,11 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         &mut self,
         rvalue: &mir::Rvalue<'vir>,
         span: Span,
+        location: mir::Location,
     ) -> Result<EncodedRvalue<'vir>, EncodeRvalueError<'vir, E>> {
         let rvalue_ty = rvalue.ty(self.local_decls, self.vcx.tcx());
         let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
-        tracing::debug!(?rvalue_ty, ?rvalue, ?span, "Encode Rvalue");
+        tracing::debug!(?rvalue_ty, ?rvalue, ?span, lo=?span.data().lo, hi=?span.data().hi, parent=?span.data().parent, "Encode Rvalue");
         match rvalue {
             // Copying immutable references is a special case: permissions must be split,
             // and a new shadow ref must be used for the new reference, and it must be bound
@@ -314,14 +316,31 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
                 let inner = p_rvalue_ty.expect_immref();
                 let place_ref = place_expr.expr.address;
+                // Value was already overwritten by borrowflow. We must get the value it used when
+                // binding, which is not available anywhere!
+                // XXX: Is this label always available?
+                // let next_shadow = self.next_shadow(Some(location));
+
+                tracing::debug!(?place_ref, "Use immref add exec");
+                // This happens after Add: borrowflow.
+                // Borrowflow binds blocked to shadow(blocked, p), and the current perm is `p/2`! So
+                // we pass twice the current permission.
+                // TODO: Use old value with label instead of *2.
+                let perm = self
+                    .vcx()
+                    .mk_bin_op_expr(
+                        vir::BinOpKind::Mul,
+                        self.vcx()
+                            .mk_const_expr(vir::ConstData::Int(2))
+                            .downcast_ty(),
+                        inner.deref_perm_field(place_ref, None),
+                    )
+                    .downcast_ty();
 
                 Ok(EncodedRvalue {
                     expr: inner
-                        .prim_to_snap_assign(inner.deref_shadow(place_ref, None))
+                        .prim_to_snap_assign(inner.deref_access(place_ref, None), perm)
                         .upcast_ty(),
-                    // post_assign_folds: Some(Box::new(move |lhs_place| {
-                    //     inner.bind_block(lhs_place, place_ref).collect()
-                    // })),
                     post_assign_folds: None,
                 })
             }
@@ -449,20 +468,20 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
                     let inner = p_rvalue_ty.expect_immref();
                     let place_ref = place_expr.expr.address;
+                    let perm = inner.perm_field(place_ref);
 
                     EncodedRvalue {
-                        expr: inner.prim_to_snap_assign(place_ref).upcast_ty(), // TODO: This should
-                        // assign
-                        // shadow(LHS)
+                        expr: inner.prim_to_snap_assign(place_ref, perm).upcast_ty(),
                         post_assign_folds: Some(Box::new(move |lhs_place| {
+                            tracing::debug!(?lhs_place, "Assign add exec");
                             // Before sharing the original ref and binding it to the shadow ref, we
                             // must have `acc(p_Param(rhs, ty), rhs.perm_field)`. It then gets
                             // halved by binding.
                             // NOTE: `perm` parameter is ignored
                             let stmts = inner.fold_actual(lhs_place, None, None).into_iter();
-                            // Point &T to the "shadow" Ref, which gets bound to the original rhs Ref.
+                            // Bind shadow ref and blocked place
                             let stmts = stmts.chain(
-                                inner.bind_block(inner.deref_shadow(lhs_place, None), place_ref),
+                                inner.bind_block(inner.deref_access(lhs_place, None), place_ref),
                             );
                             stmts.collect()
                         })),
@@ -575,7 +594,8 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
         // TODO: Label?
-        let stmts_iter = data.unbind_unblock_refs(ref_p_target, ref_p_source, None);
+        let stmts_iter =
+            data.unbind_unblock_refs(ref_p_target, ref_p_source, label.map(vir::OldLabel::Label));
         self.stmts(stmts_iter);
     }
 
@@ -612,13 +632,41 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
 
         let concretize = concretize
-            .then(|| data.unfold_actual(ref_p_target, None, None))
+            .then(|| data.unfold_actual(ref_p_target, label_target, None))
             .flatten();
         // TODO: Label?
         let stmts_iter = data
-            .unbind_unblock(data.deref_shadow(ref_p_target, None), ref_p_source)
+            .unbind_unblock(
+                data.deref_access(ref_p_target, label_target),
+                ref_p_source,
+            )
             .chain(concretize);
         self.stmts(stmts_iter);
+    }
+
+    /// Binds immref src with `shadow(*src, (*src).perm)`. Used in Add: BorrowFlow,
+    /// as the immref is not yet initialized there.
+    pub(crate) fn bind_block_shadow(
+        &mut self,
+        source_immref: MaybeLabelledPlace<'vir>,
+        label: Option<&'vir str>,
+    ) {
+        let place_source = source_immref.place();
+        let label_source = match source_immref {
+            MaybeLabelledPlace::Labelled(snap) => Some(self.get_location_label(snap.at())),
+            _ => label.map(vir::OldLabel::Label),
+        };
+
+        let ref_p_source = self.encode_place(place_source);
+        let place_ty_source = ref_p_source.ty;
+        let ref_p_source = self
+            .vcx
+            .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
+        let data = self.ty_use_impure(place_ty_source.ty).expect_immref();
+        let src = data.deref_access(ref_p_source, None);
+        let src_shadow = data.shadow_for(src, None);
+        let stmts = data.bind_block(src_shadow, src);
+        self.stmts(stmts);
     }
 
     /// Binds the shadow of `target_immref` to the shadow of `source_immref`.
@@ -804,10 +852,10 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 };
                 // src is an immref. It must be dereferenced (shadow) before binding.
                 let src = src.as_local_place().unwrap();
-                let dst = borrow_flow.short().base();
-                // self.fold(src, label); // not needed, if behind a ref (borrowflow) it's already
-                // generic
-                self.bind_block_refs(dst, src, label);
+                // let dst = borrow_flow.short().base();
+                // Well... Since dst hasn't been assigned to yet, we cannot use it as a ref.
+                // Since later `dst.0 == shadow_for(src, src.perm))`, we just use that.
+                self.bind_block_shadow(src, label);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_remove()
@@ -1069,6 +1117,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         }
         Ok(())
     }
+
     fn borrow_action(
         &mut self,
         pcg: &Pcg<'_, 'vir>,
@@ -1379,7 +1428,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                         }
                     }
                     ty::TyKind::Ref(_, _, ty::Mutability::Not) => PlaceExpr {
-                        address: e_ty.expect_immref().deref_shadow(expr.address, None),
+                        address: e_ty.expect_immref().deref_access(expr.address, None),
                         snap: None,
                     },
                     ty::TyKind::Ref(_, _, ty::Mutability::Mut) => PlaceExpr {
@@ -1399,6 +1448,28 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         self.tmp_ctr += 1;
         self.stmt(self.vcx.mk_local_decl_stmt(local, None));
         self.vcx.mk_local_ex(local)
+    }
+
+    fn next_shadow(&mut self, location: Option<mir::Location>) -> vir::ExprRef<'vir> {
+        let decl = if let Some(next_shadow_decl) = &self.next_shadow_decl {
+            next_shadow_decl
+        } else {
+            let name = vir::vir_format!(self.vcx, "_next_shadow");
+            let local = vir::vir_local_decl! { self.vcx; [name] : [vir::TYPE_REF] };
+            self.stmt(self.vcx.mk_local_decl_stmt(local, None));
+            self.next_shadow_decl = Some(local);
+            &self.next_shadow_decl.unwrap()
+        };
+
+        let expr = self.vcx.mk_local_ex(decl);
+        if let Some(location) = location {
+            self.vcx.mk_old(
+                expr,
+                vir::OldLabel::Label(self.location_label(LocationLabelPrefix::Before, location)), // FIXME: Certainly broken
+            )
+        } else {
+            expr
+        }
     }
 
     pub(crate) fn new_label(&mut self, base: &str) -> &'vir str {
@@ -1887,7 +1958,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                         .expect_predicate();
 
                     // The snapshot of the value that we are assigning.
-                    let rval_enc = self.encode_rvalue(rvalue, span);
+                    let rval_enc = self.encode_rvalue(rvalue, span, location);
 
                     match rval_enc {
                         Ok(rval_enc) => {

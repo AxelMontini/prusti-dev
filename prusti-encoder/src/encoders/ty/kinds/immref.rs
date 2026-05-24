@@ -1,5 +1,4 @@
 use crate::encoders::{
-    TyUsePureEnc,
     ty::{
         RustImmRef, RustTyDatas,
         data::TyData,
@@ -12,36 +11,31 @@ use task_encoder::{EncodeFullError, TaskEncoderDependencies};
 use vir::CastType;
 
 pub(crate) fn ty_pure<'vir>(
-    task_key: &TyData<'vir, RustTyDatas>,
-    data: &RustImmRef<'vir>,
-    deps: &mut TaskEncoderDependencies<'vir, TyPureEnc>,
+    _task_key: &TyData<'vir, RustTyDatas>,
+    _data: &RustImmRef<'vir>,
+    _deps: &mut TaskEncoderDependencies<'vir, TyPureEnc>,
     builder: &mut AdtBuilder<'vir>,
 ) -> Result<TyPureImmRef<'vir>, EncodeFullError<'vir, TyPureEnc>> {
-    // force encoding of s_Param // TODO: This is not needed anymore (theoretically, but not too
-    // sure when)
+    // XXX: Why exactly was this needed? should not be anymore anyway.
+    // // force encoding of s_Param
     // deps.require_ref::<TyUsePureEnc>(data.decompose(task_key.params))?;
-    let ref_param = builder.vcx.mk_local_decl("r", vir::TYPE_REF);
 
     let (field_snaps_to_snap, field_access) =
-        builder.constructor("", (vir::TYPE_REF, vir::TYPE_PSNAP), None);
+        builder.constructor("", (vir::TYPE_REF, vir::TYPE_REF, vir::TYPE_PSNAP), None);
 
-    // Functions
-    let shadow_ref = builder.function(
-        "shadow_ref",
-        vir::TYPE_REF,
-        vir::TYPE_REF,
-        (ref_param,),
-        &[],
-        &[],
-        None,
-    );
+
+    let shadow_for = {
+        let blocked_decl = builder.vcx.mk_local_decl("blocked", vir::TYPE_REF);
+        let perm_decl = builder.vcx.mk_local_decl("perm_seed", vir::TYPE_PERM);
+        builder.function("shadow_for", (blocked_decl.ty, perm_decl.ty), vir::TYPE_REF, (blocked_decl, perm_decl), &[], &[], None)
+    };
 
     Ok(TyPureImmRefData {
         prim_to_snap: field_snaps_to_snap,
         deref_access: field_access[0].downcast_ty(),
-        // deref_actual: field_access[1].downcast_ty(),
-        value_access: field_access[1].downcast_ty(),
-        shadow_ref,
+        blocked_access: field_access[1].downcast_ty(),
+        value_access: field_access[2].downcast_ty(),
+        shadow_for,
     })
 }
 
@@ -55,28 +49,36 @@ pub(crate) fn ty_impure<'vir>(
     let snap_type = builder.csnap_type();
     let ref_self_decl = builder.ref_self_decl();
     let ref_self = builder.vcx.mk_local_ex(ref_self_decl);
-    let ref_param = builder.vcx.mk_local_decl("r", vir::TYPE_REF);
-    let ref_param_ex = builder.vcx.mk_local_ex(ref_param);
 
     let d = data.0.decompose(GParams::empty());
     let generic = deps.require_ref::<TyImpureEnc>(d.ty)?;
 
     // Functions
-    let arbitrary_value = builder.inner.function(
-        "arbitrary_value",
-        vir::TYPE_REF,
-        snap_type,
-        (ref_param,),
-        &[],
-        &[vir::expr! {
-            ([data.1.deref_access](result: [snap_type])) == ([ref_param_ex])
-        }],
-        None,
-    );
+    let arbitrary_value = {
+        let blocked_param_decl = builder.vcx.mk_local_decl("blocked", vir::TYPE_REF);
+        let blocked_param = builder.vcx.mk_local_ex(blocked_param_decl);
+        let perm_param_decl = builder.vcx.mk_local_decl("perm_seed", vir::TYPE_PERM);
+        let perm_param = builder.vcx.mk_local_ex(perm_param_decl);
+        let shadow = pure.shadow_for.call()(blocked_param, perm_param);
+        builder.inner.function(
+            "arbitrary_value",
+            (vir::TYPE_REF, vir::TYPE_PERM),
+            snap_type,
+            (blocked_param_decl, perm_param_decl),
+            &[],
+            &[vir::expr! {
+                (([data.1.blocked_access](result: [snap_type])) == ([blocked_param])) &&
+                    (([data.1.deref_access](result: [snap_type])) == ([shadow]))
+            }],
+            None,
+        )
+    };
 
     // fields
     let ref_field = builder.field("val", snap_type);
     let perm_field = builder.field("perm_owned", vir::TYPE_PERM);
+    // let ever_changing_shadow_field = builder.field("ever_changing_shadow", vir::TYPE_REF); //
+    // This is added once per function
 
     // main predicate
     builder.mk_predicate(
@@ -100,9 +102,6 @@ pub(crate) fn ty_impure<'vir>(
     // `source.perm_field`. Beware! `old(source.perm_field)` (using this) is not the same as
     // `old(souce).perm_field`!
     let source_perm_field = builder.vcx.mk_field_expr(ref_source, perm_field);
-    let old_source_new_perm_field = builder
-        .vcx
-        .mk_field_expr(builder.vcx.mk_old_expr(ref_source), perm_field);
     let target_perm_field = builder.vcx.mk_field_expr(ref_target, perm_field);
     let acc_perm_field_source = builder.vcx.mk_acc_field_expr(ref_source, perm_field, None);
     let acc_perm_field_target = builder.vcx.mk_acc_field_expr(ref_target, perm_field, None);
@@ -195,9 +194,6 @@ pub(crate) fn ty_impure<'vir>(
         ),
         builder.vcx.mk_eq_expr(source_perm_field, target_perm_field),
     ]);
-    let post_new_snap_self = builder
-        .vcx
-        .mk_eq_expr(ref_source, (pure.shadow_ref)(ref_target));
 
     // Wand to obtain back permission to original value.
     let tmp_perm_decl = builder.vcx.mk_local_decl("tmp", vir::TYPE_PERM);
@@ -258,7 +254,6 @@ pub(crate) fn ty_impure<'vir>(
             half_source_param,
         ],
         &[
-            post_new_snap_self,
             acc_perm_field_source,
             acc_perm_field_target,
             post_perm_field_value,
@@ -310,11 +305,22 @@ pub(crate) fn ty_impure<'vir>(
         ],
     );
 
+    let refresh_next_shadow = builder.inner.function(
+        "refresh_next_shadow",
+        vir::TYPE_REF,
+        vir::TYPE_REF,
+        (ref_source_decl,),
+        &[],
+        &[],
+        None,
+    );
+
     Ok(TyImpureImmRefData {
         pure,
         perm_field,
         bind_block,
         unbind_unblock,
         arbitrary_value,
+        refresh_next_shadow,
     })
 }

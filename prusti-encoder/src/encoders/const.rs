@@ -180,8 +180,10 @@ impl<'enc, 'vir: 'enc> Enc<'enc, 'vir> {
                     (prim.prim_to_snap)(val)
                 }
                 super::ty::TySpecifics::ImmRef(immref) => {
+                    // FIXME: Most likely wrong encoding, i don't quite get what's being done here
+                    // and why
                     let (addr, snap) = self.encode_ref_addr_snap(val, ty)?;
-                    TyUsePureImmRef::prim_to_snap(immref, addr, snap)
+                    TyUsePureImmRef::prim_to_snap(immref, vcx.mk_null(), addr, snap)
                 }
                 super::ty::TySpecifics::MutRef(mutref) => {
                     let (addr, snap) = self.encode_ref_addr_snap(val, ty)?;
@@ -285,7 +287,7 @@ impl ConstEnc {
                     // first, we create a string snapshot
                     let snap = (str_snap.arbitrary)().upcast_ty();
                     // wrap it in a ref
-                    vir::with_vcx(|vcx| ref_ty.prim_to_snap(vcx.mk_null(), snap))
+                    vir::with_vcx(|vcx| ref_ty.prim_to_snap(vcx.mk_null(), vcx.mk_null(), snap))
                 }
                 ConstValue::Slice { .. } => todo!("ConstValue::Slice: {ty:?}"),
                 ConstValue::Indirect { .. } => todo!("ConstValue::Indirect"),
