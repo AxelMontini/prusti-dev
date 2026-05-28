@@ -181,7 +181,6 @@ where
     pub current_terminator: Option<vir::TerminatorStmt<'vir>>,
 
     pub encoded_blocks: Vec<vir::CfgBlock<'vir>>, // TODO: use IndexVec ?
-    pub next_shadow_decl: Option<&'vir LocalDeclData<'vir, vir::Ref>>,
 }
 
 /// Represents the translation of a MIR place. If the place crosses a shared
@@ -636,10 +635,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .flatten();
         // TODO: Label?
         let stmts_iter = data
-            .unbind_unblock(
-                data.deref_access(ref_p_target, label_target),
-                ref_p_source,
-            )
+            .unbind_unblock(data.deref_access(ref_p_target, label_target), ref_p_source)
             .chain(concretize);
         self.stmts(stmts_iter);
     }
@@ -1448,28 +1444,6 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         self.tmp_ctr += 1;
         self.stmt(self.vcx.mk_local_decl_stmt(local, None));
         self.vcx.mk_local_ex(local)
-    }
-
-    fn next_shadow(&mut self, location: Option<mir::Location>) -> vir::ExprRef<'vir> {
-        let decl = if let Some(next_shadow_decl) = &self.next_shadow_decl {
-            next_shadow_decl
-        } else {
-            let name = vir::vir_format!(self.vcx, "_next_shadow");
-            let local = vir::vir_local_decl! { self.vcx; [name] : [vir::TYPE_REF] };
-            self.stmt(self.vcx.mk_local_decl_stmt(local, None));
-            self.next_shadow_decl = Some(local);
-            &self.next_shadow_decl.unwrap()
-        };
-
-        let expr = self.vcx.mk_local_ex(decl);
-        if let Some(location) = location {
-            self.vcx.mk_old(
-                expr,
-                vir::OldLabel::Label(self.location_label(LocationLabelPrefix::Before, location)), // FIXME: Certainly broken
-            )
-        } else {
-            expr
-        }
     }
 
     pub(crate) fn new_label(&mut self, base: &str) -> &'vir str {
