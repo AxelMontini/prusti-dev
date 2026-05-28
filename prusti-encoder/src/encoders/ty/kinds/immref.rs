@@ -1,11 +1,9 @@
-use crate::encoders::{
-    ty::{
-        RustImmRef, RustTyDatas,
-        data::TyData,
-        generics::GParams,
-        impure::{PredicateBuilder, TyImpureEnc, TyImpureImmRef, TyImpureImmRefData},
-        pure::{AdtBuilder, PureTyDatas, TyPureEnc, TyPureImmRef, TyPureImmRefData},
-    },
+use crate::encoders::ty::{
+    RustImmRef, RustTyDatas,
+    data::TyData,
+    generics::GParams,
+    impure::{PredicateBuilder, TyImpureEnc, TyImpureImmRef, TyImpureImmRefData},
+    pure::{AdtBuilder, PureTyDatas, TyPureEnc, TyPureImmRef, TyPureImmRefData},
 };
 use task_encoder::{EncodeFullError, TaskEncoderDependencies};
 use vir::CastType;
@@ -23,12 +21,19 @@ pub(crate) fn ty_pure<'vir>(
     let (field_snaps_to_snap, field_access) =
         builder.constructor("", (vir::TYPE_REF, vir::TYPE_REF, vir::TYPE_PSNAP), None);
 
-
     // TODO: Move back to immutable code only
     let shadow_for = {
         let blocked_decl = builder.vcx.mk_local_decl("blocked", vir::TYPE_REF);
         let perm_decl = builder.vcx.mk_local_decl("perm_seed", vir::TYPE_PERM);
-        builder.function("shadow_for", (blocked_decl.ty, perm_decl.ty), vir::TYPE_REF, (blocked_decl, perm_decl), &[], &[], None)
+        builder.function(
+            "shadow_for",
+            (blocked_decl.ty, perm_decl.ty),
+            vir::TYPE_REF,
+            (blocked_decl, perm_decl),
+            &[],
+            &[],
+            None,
+        )
     };
 
     Ok(TyPureImmRefData {
