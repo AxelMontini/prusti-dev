@@ -96,17 +96,48 @@ impl TaskEncoder for IndirectPredicatesEnc {
                     // TODO: De-duplicate immref and mutref code? Almost the same except perms
                     // TODO: USE PROPER PERMISSIONS!!! Not write
                     assert_eq!(ty.args.args().len(), 2);
+                    let immref_impure = deps.require_dep::<TyUseImpureEnc>(ty)?.expect_immref();
                     let inner_ty = data.decompose_context(ty.ty.params, ty.args);
                     let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
                     let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
                     let task_region = task_key.region(());
+                    tracing::debug!(?task_region, ?ref_region, "Task and ref region what?");
                     if ref_region == task_region {
+                        predicate_applications.push(vcx.mk_lazy_expr(
+                            "ref_perm_field_indirect",
+                            vir::TYPE_BOOL,
+                            Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
+                                let addr = ref_domain.deref_access(self_expr.downcast_ty());
+                                let acc_field = immref_impure.acc_perm_field(addr, None);
+                                let field_bound_nonzero = vcx
+                                    .mk_bin_op_expr(
+                                        vir::BinOpKind::CmpLt,
+                                        vcx.mk_no_perm(),
+                                        immref_impure.perm_field(addr),
+                                    )
+                                    .downcast_ty();
+                                let field_bound_le_half = vcx
+                                    .mk_bin_op_expr(
+                                        vir::BinOpKind::CmpLe,
+                                        immref_impure.perm_field(addr),
+                                        vcx.mk_perm::<1, 2>(),
+                                    )
+                                    .downcast_ty();
+                                let expr = vcx.mk_conj(&[
+                                    acc_field,
+                                    field_bound_nonzero,
+                                    field_bound_le_half,
+                                ]);
+                                expr.kind
+                            }),
+                        ));
                         predicate_applications.push(vcx.mk_lazy_expr(
                             "ref_indirect",
                             vir::TYPE_BOOL,
                             Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
                                 let addr = ref_domain.deref_access(self_expr.downcast_ty());
-                                let expr = inner_impure.ref_to_pred(vcx, addr, None).kind;
+                                let perm = immref_impure.perm_field(addr);
+                                let expr = inner_impure.ref_to_pred(vcx, addr, Some(perm)).kind;
                                 tracing::debug!(?expr, "Instantiated ref_indirect lazy expr");
                                 expr
                             }),

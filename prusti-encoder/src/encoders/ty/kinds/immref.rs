@@ -24,6 +24,7 @@ pub(crate) fn ty_pure<'vir>(
         builder.constructor("", (vir::TYPE_REF, vir::TYPE_REF, vir::TYPE_PSNAP), None);
 
 
+    // TODO: Move back to immutable code only
     let shadow_for = {
         let blocked_decl = builder.vcx.mk_local_decl("blocked", vir::TYPE_REF);
         let perm_decl = builder.vcx.mk_local_decl("perm_seed", vir::TYPE_PERM);

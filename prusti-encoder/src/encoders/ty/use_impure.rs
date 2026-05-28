@@ -554,6 +554,10 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         vir::with_vcx(|vcx| vcx.mk_field_expr(self_ref, self.impure.perm_field))
     }
 
+    pub fn acc_perm_field(&self, self_ref: vir::ExprRef<'vir>, p: Option<vir::ExprPerm<'vir>>) -> vir::ExprBool<'vir> {
+        vir::with_vcx(|vcx| vcx.mk_acc_field_expr(self_ref, self.impure.perm_field, p))
+    }
+
     pub fn deref_perm_field(
         &self,
         self_ref: vir::ExprRef<'vir>,
