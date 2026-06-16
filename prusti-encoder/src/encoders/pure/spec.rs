@@ -86,7 +86,7 @@ pub struct EncodedPledge<'vir> {
     pub expiry_postcondition: PledgeExpr<'vir>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MirSpecEncOutput<'vir> {
     pub pres: Vec<vir::ExprBool<'vir>>,
     pub posts: Vec<vir::ExprBool<'vir>>,
@@ -261,6 +261,7 @@ impl TaskEncoder for MirSpecEnc {
                     })
                 })
                 .collect::<Result<Vec<vir::ExprBool<'_>>, _>>()?;
+            tracing::debug!(?specs, "What the actual fuck");
             let pledges = specs
                 .pledges
                 .iter()
@@ -319,6 +320,7 @@ impl TaskEncoder for MirSpecEnc {
                             to_bool.call()(rhs_expr).downcast_ty()
                         });
                         let rhs_expr = PledgeExpr::new(*rhs_def_id, rhs_expr);
+                        tracing::debug!(?lhs_expr, ?rhs_expr, "Pledge");
                         EncodedPledge {
                             expiry_obligation: lhs_expr,
                             expiry_postcondition: rhs_expr,

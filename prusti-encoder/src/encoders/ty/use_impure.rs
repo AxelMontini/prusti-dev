@@ -528,6 +528,19 @@ impl<'vir> TyUseImpureEnum<'vir> {
 }
 
 impl<'vir> TyUseImpureImmRef<'vir> {
+    pub fn deref_access_snap(
+        &self,
+        self_snap: vir::ExprCSnap<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> vir::ExprRef<'vir> {
+        let deref = self.impure.pure.deref_access.call()(self_snap);
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
+    }
+
+    pub fn csnap(&self, self_ref: vir::ExprRef<'vir>) -> vir::ExprCSnap<'vir> {
+        self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const()).downcast_ty()
+    }
+
     pub fn deref_access(
         &self,
         self_ref: vir::ExprRef<'vir>,
@@ -535,8 +548,7 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     ) -> vir::ExprRef<'vir> {
         let snap = self.ref_to_snap.call()(self_ref, self.args.get_ty(), self.args.get_const())
             .downcast_ty();
-        let deref = self.impure.pure.deref_access.call()(snap);
-        vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
+        self.deref_access_snap(snap, label)
     }
 
     pub fn blocked_access(
@@ -707,16 +719,19 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         target: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
         source: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
-        Some(vir::with_vcx(|vcx| {
-            vcx.alloc(vir::StmtGenData::new(vcx.alloc(
-                self.impure.unbind_unblock.call()(
-                    target,
-                    source,
-                    self.args.get_ty(),
-                    self.args.get_const(),
-                ),
-            )))
-        }))
+        vir::with_vcx(|vcx| {
+            [
+                vcx.mk_assert_stmt(self.acc_perm_field(source, None)),
+                vcx.alloc(vir::StmtGenData::new(vcx.alloc(
+                    self.impure.unbind_unblock.call()(
+                        target,
+                        source,
+                        self.args.get_ty(),
+                        self.args.get_const(),
+                    ),
+                ))),
+            ]
+        })
         .into_iter()
     }
 }

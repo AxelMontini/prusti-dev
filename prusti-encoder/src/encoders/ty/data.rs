@@ -122,6 +122,10 @@ impl<'vir, D: TyDatas<'vir>> TySpecifics<'vir, D> {
         matches!(self, Self::Param(_))
     }
 
+    pub fn is_immref(&self) -> bool {
+        matches!(self, Self::ImmRef(_))
+    }
+
     pub fn is_mutref(&self) -> bool {
         matches!(self, Self::MutRef(_))
     }

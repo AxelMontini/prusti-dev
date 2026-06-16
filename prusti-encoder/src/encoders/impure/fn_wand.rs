@@ -1,10 +1,11 @@
 use crate::encoders::{
-    ImpureEncVisitor, MirLocalDefEncOutput, MirSpecEnc,
+    ImpureEncVisitor, MirLocalDefEncOutput, MirSpecEnc, TyUseImpureEnc,
     pure::spec::{EncodedPledge, MirSpecEncMode, PledgeArgs, PledgeExpr},
     ty::{
         RustTyDecomposition,
         generics::GParams,
         indirect::{IndirectPredicatesEnc, projection_for_generalized_idx},
+        indirect_wand::{IndirectPredicatesWandLhsEnc, IndirectPredicatesWandRhsEnc},
     },
 };
 use pcg::borrow_pcg::{
@@ -19,7 +20,7 @@ use prusti_rustc_interface::{
     span::def_id::DefId,
 };
 use task_encoder::{EncodeFullError, EncodeFullResult, TaskEncoder, TaskEncoderDependencies};
-use vir::HasType;
+use vir::{CastType, HasType, LocalDeclPerm};
 
 /// Encodes the magic wands given a function signature.
 pub struct WandEnc;
@@ -45,12 +46,13 @@ impl<'vir, E: TaskEncoder> ImpureEncVisitor<'vir, '_, E> {
         let args = PledgeExpr::pledge_args(result, args);
 
         for wand_data in self.wands.viper_wands() {
-            let Some(wand) = self
+            let Some((wand, _)) = self
                 .wands
                 .mk_wand(&wand_data, args, None, self.vcx, self.deps)
             else {
                 continue;
             };
+            tracing::debug!(?wand_data, "Wand Data for UnblockGraph");
             let mut package_script = Vec::new();
             for rhs in wand_data.rhs.iter() {
                 let ug = UnblockGraph::for_node(
@@ -58,7 +60,15 @@ impl<'vir, E: TaskEncoder> ImpureEncVisitor<'vir, '_, E> {
                     final_borrow_state,
                     self.pcg_ctxt(),
                 );
+                let fbr_formatted = format!("{final_borrow_state:#?}");
+                tracing::debug!(
+                    ?ug,
+                    ?rhs,
+                    final_borrow_state = fbr_formatted,
+                    "UnblockGraph"
+                );
                 let actions = ug.actions(self.pcg_ctxt()).unwrap();
+                tracing::debug!(?actions, "UnblockGraph Actions");
                 let unblock = self.block(|visitor| {
                     visitor.pcs_unblock_actions(final_borrow_state, &actions, Some(label))
                 })?;
@@ -119,7 +129,7 @@ pub struct WandEncOutput<'vir> {
 /// wand is re-encoded with the call-site substitutions and the caller's
 /// generic parameters, so that placeholders like `Self` or other callee
 /// generics are replaced by concrete types from the caller's perspective.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct WandCallContext<'vir> {
     pub caller_substs: ty::GenericArgsRef<'vir>,
     pub caller_g_params: GParams<'vir>,
@@ -152,6 +162,76 @@ impl<'vir> WandEncOutput<'vir> {
         }
     }
 
+    /// Similar to [`encode_predicates_for_function_shape_node`], but it adds extra
+    /// predicates on top of the indirect representation of nodes.
+    /// Also it needs to know whether we're encoding the LHS or RHS of a wand,
+    /// as the generated expressions might differ.
+    /// If `lhs_perm` is `Some(_)`, then it encodes the LHS, otherwise the RHS.
+    #[tracing::instrument(skip(deps, vcx, self, snap))]
+    fn encode_predicates_for_wand_node(
+        &self,
+        vcx: &'vir vir::VirCtxt<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, impl TaskEncoder>,
+        lhs_perm: Option<LocalDeclPerm<'vir>>,
+        g: impl Into<FunctionShapeNode<Generalized>> + core::fmt::Debug,
+        call_ctx: Option<WandCallContext<'vir>>,
+        mut snap: impl FnMut(mir::Local) -> vir::ExprSnap<'vir>,
+    ) -> Option<(vir::ExprBool<'vir>, vir::ExprPerm<'vir>)> {
+        use vir::Reify;
+        let g = g.into();
+        let fn_sig = self.fn_sig(vcx, call_ctx);
+        let arg_ty = g.ty(fn_sig);
+        let decomp = RustTyDecomposition::from_ty(arg_ty, self.g_params(vcx, call_ctx));
+        let region_proj =
+            projection_for_generalized_idx(arg_ty, g.region_idx(), decomp, vcx.tcx())?;
+        let data = deps.require_dep::<TyUseImpureEnc>(decomp).unwrap();
+
+        let predicates = if lhs_perm.is_some() {
+            deps.require_dep::<IndirectPredicatesWandLhsEnc>(region_proj)
+                .unwrap()
+                .predicate_applications
+        } else {
+            deps.require_dep::<IndirectPredicatesWandRhsEnc>(region_proj)
+                .unwrap()
+                .predicate_applications
+        };
+
+        if predicates.is_empty() {
+            // There are no resources associated with this node, skip.
+            return None;
+        }
+
+        tracing::debug!(
+            ?g,
+            ?decomp,
+            ?region_proj,
+            ?predicates,
+            "Encoded predicates for wand node"
+        );
+
+        let local = g.mir_local();
+        let local_snap = snap(local);
+        let lhs_perm_expr = lhs_perm
+            .map(|decl| vcx.mk_local_ex(decl))
+            .unwrap_or_else(|| vcx.mk_no_perm());
+        let lhs_perm_value = match data.specifics {
+            crate::encoders::ty::TySpecifics::ImmRef(data) => {
+                data.perm_field(data.deref_access_snap(local_snap.downcast_ty(), None))
+            }
+            _ => vcx.mk_no_perm(),
+        };
+
+        Some((
+            vcx.mk_conj(
+                &predicates
+                    .iter()
+                    .map(|p| p.reify(vcx, (local_snap, lhs_perm_expr)))
+                    .collect::<Vec<_>>(),
+            ),
+            lhs_perm_value,
+        ))
+    }
+
     fn encode_predicates_for_function_shape_node(
         &self,
         vcx: &'vir vir::VirCtxt<'vir>,
@@ -170,6 +250,7 @@ impl<'vir> WandEncOutput<'vir> {
             .require_dep::<IndirectPredicatesEnc>(region_proj)
             .unwrap()
             .predicate_applications;
+
         if predicates.is_empty() {
             // There are no resources associated with this node, skip.
             return None;
@@ -246,12 +327,13 @@ impl<'vir> WandEncOutput<'vir> {
 
         // TODO: wands for late-bound regions
         self.viper_wands().into_iter().filter_map(move |wand_data| {
-            let wand = self.mk_wand(&wand_data, args, None, vcx, deps)?;
-            Some(vcx.mk_let_expr(
-                wand_result,
-                local_defs[mir::RETURN_PLACE].impure_snap,
-                vcx.mk_wand_expr(wand),
-            ))
+            let (wand, perms) = self.mk_wand(&wand_data, args, None, vcx, deps)?;
+            let wand_expr = vcx.mk_wand_expr(wand);
+            let expr = perms.into_iter().fold(wand_expr, |expr, (decl, val)| {
+                vcx.mk_let_expr(decl, val, expr)
+            });
+
+            Some(vcx.mk_let_expr(wand_result, local_defs[mir::RETURN_PLACE].impure_snap, expr))
         })
     }
 
@@ -273,7 +355,7 @@ impl<'vir> WandEncOutput<'vir> {
         });
         let args = PledgeExpr::pledge_args(result, args);
         for wand_data in self.viper_wands() {
-            let Some(wand) =
+            let Some((wand, _)) =
                 self.mk_wand(&wand_data, args, Some(call_ctx), visitor.vcx, visitor.deps)
             else {
                 continue;
@@ -289,14 +371,20 @@ impl<'vir> WandEncOutput<'vir> {
         call_ctx: Option<WandCallContext<'vir>>,
         vcx: &'vir vir::VirCtxt<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, E>,
-    ) -> Option<vir::Wand<'vir>> {
+    ) -> Option<(
+        vir::Wand<'vir>,
+        Vec<(vir::LocalDeclPerm<'vir>, vir::ExprPerm<'vir>)>,
+    )> {
         debug_assert!(!wand_data.lhs.is_empty());
+        // TODO: Deduplicate. Immref wands are a bit more involved than regular ones,
+        // and they introduce some perm field expressions.
+        // TODO: What if rhs is blocked by multiple lhs? We need multiple perm let bindings and
+        // stuff
         let rhs = wand_data.rhs.iter().filter_map(|g| {
-            self.encode_predicates_for_function_shape_node(vcx, deps, *g, call_ctx, |i| {
-                pledge_args[i]
-            })
+            self.encode_predicates_for_wand_node(vcx, deps, None, *g, call_ctx, |i| pledge_args[i])
         });
         let rhs = rhs
+            .map(|(r, _)| r)
             .chain(
                 wand_data
                     .pledges
@@ -312,21 +400,22 @@ impl<'vir> WandEncOutput<'vir> {
         }
         let rhs = vcx.mk_conj(&rhs);
         let lhs = wand_data.lhs.iter().filter_map(|g| {
-            self.encode_predicates_for_function_shape_node(vcx, deps, *g, call_ctx, |i| {
+            let lhs_perm = vcx.mk_local_decl("should_this_be_random", vir::TYPE_PERM);
+            self.encode_predicates_for_wand_node(vcx, deps, Some(lhs_perm), *g, call_ctx, |i| {
                 pledge_args[i]
             })
+            .map(|r| (r.0, (lhs_perm, r.1)))
         });
-        let lhs = lhs
-            .chain(
-                wand_data
-                    .pledges
-                    .iter()
-                    .filter_map(|pledge| pledge.expiry_obligation)
-                    .map(|expr| expr.expr(pledge_args)),
-            )
-            .collect::<Vec<_>>();
+        let (mut lhs, perm_exprs): (Vec<_>, Vec<_>) = lhs.unzip();
+        lhs.extend(
+            wand_data
+                .pledges
+                .iter()
+                .filter_map(|pledge| pledge.expiry_obligation)
+                .map(|expr| expr.expr(pledge_args)),
+        );
         let lhs = vcx.mk_conj(&lhs);
-        Some(vcx.mk_wand(lhs, rhs))
+        Some((vcx.mk_wand(lhs, rhs), perm_exprs))
     }
 }
 
@@ -404,8 +493,11 @@ impl TaskEncoder for WandEnc {
 
             let coupled_edges = shape.coupled_edges();
 
+            tracing::debug!(?def_id, ?shape, "Function shape");
+
             let (inputs, outputs) = shape.take_inputs_and_outputs();
             let spec = deps.require_dep::<MirSpecEnc>((def_id, def_id, MirSpecEncMode::Impure))?;
+            tracing::debug!(?def_id, ?spec, "Function spec");
             if coupled_edges.is_empty() {
                 assert!(spec.pledges.is_empty());
                 return Ok((
@@ -449,6 +541,7 @@ impl TaskEncoder for WandEnc {
                     Some(WandData::new(targets, sources, pledges.clone()))
                 })
                 .collect();
+            tracing::debug!(?def_id, ?wands, "Function wands");
             let output: WandEncOutput<'vir> = WandEncOutput {
                 function_data: task_key.data,
                 inputs,

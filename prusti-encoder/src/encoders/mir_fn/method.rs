@@ -223,8 +223,18 @@ impl TaskEncoder for MethodEnc {
 
             // ..
             pres.extend(wands.indirect_pres(vcx, &arg_defs, deps));
+            let posts_indirect = posts.len();
             posts.extend(wands.indirect_posts(vcx, &arg_defs, deps));
+            let posts_wand = posts.len();
             posts.extend(wands.wand_posts(vcx, &arg_defs, deps));
+
+            tracing::debug!(
+                ?def_id,
+                ?pres,
+                posts_direct=?posts[..posts_indirect],
+                posts_indirect=?posts[posts_indirect..posts_wand],
+                posts_wand=?posts[posts_wand..],
+                "Encoded preconditions and postconditions");
 
             // Do not encode the method body if it is external, trusted, just
             // a call stub, or a trait function without a default implementation
