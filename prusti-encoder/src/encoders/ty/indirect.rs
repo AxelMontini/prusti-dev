@@ -101,7 +101,12 @@ impl TaskEncoder for IndirectPredicatesEnc {
                     let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
                     let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
                     let task_region = task_key.region(());
-                    tracing::debug!(?task_region, ?ref_region, "Task and ref region what?");
+                    tracing::debug!(
+                        ?task_key,
+                        ?task_region,
+                        ?ref_region,
+                        "Task and ref region what?"
+                    );
                     if ref_region == task_region {
                         predicate_applications.push(vcx.mk_lazy_expr(
                             "ref_perm_field_indirect",

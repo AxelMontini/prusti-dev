@@ -297,8 +297,6 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             // Copying immutable references is a special case: permissions must be split,
             // and a new shadow ref must be used for the new reference, and it must be bound
             // to the old ref's shadow (this must be set in the snapshot of the new ref aswell).
-            // TODO: Is this always correct? Can a ref be passed to a function by copy and not by
-            // move? (usually args are explicitly copied beforehand, so I hope not).
             mir::Rvalue::Use(mir::Operand::Copy(place))
                 if matches!(p_rvalue_ty.specifics, encoders::ty::TySpecifics::ImmRef(_)) =>
             {
@@ -306,10 +304,6 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 let p_rvalue_ty = self.ty_use_impure(rvalue_ty);
                 let inner = p_rvalue_ty.expect_immref();
                 let place_ref = place_expr.expr.address;
-                // Value was already overwritten by borrowflow. We must get the value it used when
-                // binding, which is not available anywhere!
-                // XXX: Is this label always available?
-                // let next_shadow = self.next_shadow(Some(location));
 
                 tracing::debug!(?place_ref, "Use immref add exec");
                 // This happens after Add: borrowflow.
@@ -468,7 +462,8 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             // must have `acc(p_Param(rhs, ty), rhs.perm_field)`. It then gets
                             // halved by binding.
                             // NOTE: `perm` parameter is ignored
-                            let stmts = inner.fold_actual(lhs_place, None, None).into_iter();
+                            let perm = inner.perm_field(place_ref);
+                            let stmts = inner.fold_actual(lhs_place, None, Some(perm)).into_iter();
                             // Bind shadow ref and blocked place
                             let stmts = stmts.chain(
                                 inner.bind_block(inner.deref_access(lhs_place, None), place_ref),
