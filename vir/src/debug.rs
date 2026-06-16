@@ -446,6 +446,7 @@ impl<'vir, Curr, Next> Debug for StmtKindGenData<'vir, Curr, Next> {
             Self::Label(label) => write!(f, "label {label}"),
             Self::Comment(info) => write!(f, "// {info}"),
             Self::Dummy(info) => write!(f, "// {info}"),
+            Self::Assert(data) => write!(f, "assert {data:indent$?}"),
         }
     }
 }

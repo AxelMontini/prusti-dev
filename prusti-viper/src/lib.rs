@@ -966,6 +966,9 @@ impl<'vir, 'v> ToViper<'vir, 'v> for vir::Stmt<'vir> {
                 .unfold_with_pos(pred.to_viper_no_pos(ctx), ctx.span_to_pos(self.span)),
             vir::StmtKindGenData::Label(label) => ctx.ast.label(label, &[]),
             //vir::StmtGenData::Dummy(#[reify_copy] &'vir str),
+            vir::StmtKindGenData::Assert(v) => ctx
+                .ast
+                .assert(v.to_viper_no_pos(ctx), ctx.span_to_pos(self.span)),
             _ => unimplemented!(),
         }
     }
