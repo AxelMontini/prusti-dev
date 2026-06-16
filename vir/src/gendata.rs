@@ -515,6 +515,7 @@ pub enum StmtKindGenData<'vir, Curr, Next> {
     Label(&'vir str),
     Comment(&'vir str),
     Dummy(&'vir str),
+    Assert(ExprGenBool<'vir, Curr, Next>),
 }
 
 #[derive(VirHash, VirReify, VirSerde)]
