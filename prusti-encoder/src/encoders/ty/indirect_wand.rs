@@ -365,127 +365,141 @@ impl TaskEncoder for IndirectPredicatesWandRhsEnc {
                 .unwrap()
                 .predicate_applications;
 
-            match combined.specifics {
-                // Optimisation: if there are no type arguments, there cannot be
-                // anything behind a ref inside (except for 'static, which we
-                // ignore for now). Plus it skips unsupported types if they
-                // don't have lifetimes.
-                _ if ty.args.args().is_empty() => (),
-                // TODO: it's not valid to have nothing for these. We should fix
-                // this by using an opaque predicate to represent potential
-                // indirect stuff. For example:
-                // fn foo<'a, T: Trait<'a>>(x: T) -> &'a mut i32 { x.get() }
-                // Here, `T` could be instantiated as `&'a mut i32` in which
-                // case we would want a wand with `i32(result) --* opaque_behind_a(x)`.
-                // This is why we should return `opaque_behind_a(x)` here.
-                TySpecifics::Param(_) | TySpecifics::Opaque(_) | TySpecifics::ArrayLike(_) => (),
-                TySpecifics::ImmRef((data, ref_domain)) => {
-                    // TODO: De-duplicate immref and mutref code? Almost the same except perms
-                    // TODO: USE PROPER PERMISSIONS!!! Not write
-                    assert_eq!(ty.args.args().len(), 2);
-                    let immref_impure = deps.require_dep::<TyUseImpureEnc>(ty)?.expect_immref();
-                    let inner_ty = data.decompose_context(ty.ty.params, ty.args);
-                    let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
-                    let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
-                    tracing::debug!(
-                        ?task_key,
-                        ?task_region,
-                        ?ref_region,
-                        "Task and ref region what?"
-                    );
-                    if ref_region == task_region {
-                        // RHS
+            // no point in encoding wand if node has no resources associated
+            if !indirect_predicates.is_empty() {
+                // transform lazy `ref -> expr` to `(ref, _perm) -> expr`
+                // and append to preds
+                predicate_applications.extend(indirect_predicates.into_iter().map(|p| {
+                    vcx.mk_lazy_expr(
+                        "testtest",
+                        vir::TYPE_BOOL,
+                        Box::new(move |vcx, (self_expr, _perm)| p.reify(vcx, self_expr).kind),
+                    )
+                }));
+                match combined.specifics {
+                    // Optimisation: if there are no type arguments, there cannot be
+                    // anything behind a ref inside (except for 'static, which we
+                    // ignore for now). Plus it skips unsupported types if they
+                    // don't have lifetimes.
+                    _ if ty.args.args().is_empty() => (),
+                    // TODO: it's not valid to have nothing for these. We should fix
+                    // this by using an opaque predicate to represent potential
+                    // indirect stuff. For example:
+                    // fn foo<'a, T: Trait<'a>>(x: T) -> &'a mut i32 { x.get() }
+                    // Here, `T` could be instantiated as `&'a mut i32` in which
+                    // case we would want a wand with `i32(result) --* opaque_behind_a(x)`.
+                    // This is why we should return `opaque_behind_a(x)` here.
+                    TySpecifics::Param(_) | TySpecifics::Opaque(_) | TySpecifics::ArrayLike(_) => {
+                        ()
+                    }
+                    TySpecifics::ImmRef((data, ref_domain)) => {
+                        // TODO: De-duplicate immref and mutref code? Almost the same except perms
+                        // TODO: USE PROPER PERMISSIONS!!! Not write
+                        assert_eq!(ty.args.args().len(), 2);
+                        let immref_impure = deps.require_dep::<TyUseImpureEnc>(ty)?.expect_immref();
+                        let inner_ty = data.decompose_context(ty.ty.params, ty.args);
+                        let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
+                        let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
+                        tracing::debug!(
+                            ?task_key,
+                            ?task_region,
+                            ?ref_region,
+                            "Task and ref region what?"
+                        );
+                        if ref_region == task_region {
+                            // RHS
+                            predicate_applications.push(vcx.mk_lazy_expr(
+                                "perm_field_eq_perm",
+                                vir::TYPE_BOOL,
+                                Box::new(
+                                    move |vcx,
+                                          (self_expr, perm): (
+                                        vir::ExprSnap<'vir>,
+                                        vir::ExprPerm<'vir>,
+                                    )| {
+                                        let addr = ref_domain.deref_access(self_expr.downcast_ty());
+                                        let perm_field = immref_impure.perm_field(addr);
+                                        let expr = vcx.mk_eq_expr(perm, perm_field);
+                                        expr.kind
+                                    },
+                                ),
+                            ));
+                        }
+                        // if let Some(new_projection) =
+                        //     LifetimeProjection::new(inner_ty, task_key.region(()), None, ())
+                        // {
+                        //     let inner_indirect =
+                        //         deps.require_dep::<IndirectPredicatesWandRhsEnc>(new_projection)?;
+                        //     predicate_applications.extend(
+                        //         inner_indirect
+                        //             .predicate_applications
+                        //             .into_iter()
+                        //             .map(|inner_expr| {
+                        //                 vcx.mk_lazy_expr(
+                        //                     "ref_inner_indirect",
+                        //                     vir::TYPE_BOOL,
+                        //                     Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
+                        //                         let expr = inner_expr
+                        //                             .reify(
+                        //                                 vcx,
+                        //                                 inner_impure.ref_to_snap(
+                        //                                     ref_domain
+                        //                                         .deref_access(self_expr.downcast_ty()),
+                        //                                 ),
+                        //                             )
+                        //                             .kind;
+                        //                         tracing::debug!(
+                        //                             ?expr,
+                        //                             "Instantiated ref_inner_indirect lazy expr"
+                        //                         );
+                        //                         expr
+                        //                     }),
+                        //                 )
+                        //             }),
+                        //     );
+                        // }
+                    }
+                    TySpecifics::StructLike(data) => {
+                        // TODO: invalid recursion here if the defined struct is
+                        // recursive!
+                        for (accessor, inner_expr) in collect_field_predicates(data, deps)? {
+                            predicate_applications.push(vcx.mk_lazy_expr(
+                                "struct_field_indirect",
+                                vir::TYPE_BOOL,
+                                Box::new(
+                                    move |vcx,
+                                          (self_expr, perm): (
+                                        vir::ExprSnap<'vir>,
+                                        vir::ExprPerm<'vir>,
+                                    )| {
+                                        inner_expr
+                                            .reify(
+                                                vcx,
+                                                (accessor.read(self_expr.downcast_ty()), perm),
+                                            )
+                                            .kind
+                                    },
+                                ),
+                            ));
+                        }
+                    }
+                    TySpecifics::EnumLike(data) => {
+                        let snap_to_discr_snap = data.data.1.snap_to_discr_snap;
+
+                        let variant_preds = data
+                            .variants
+                            .into_iter()
+                            .map(|variant| {
+                                let fields = collect_field_predicates(variant.inner, deps)?;
+                                Ok((variant.data.1.discr, fields))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+
+                        if variant_preds.is_empty() {
+                            return Ok(((), IndirectPredicatesWandRhsEncOutputRef::new(vec![])));
+                        }
+
                         predicate_applications.push(vcx.mk_lazy_expr(
-                            "perm_field_eq_old",
-                            vir::TYPE_BOOL,
-                            Box::new(
-                                move |vcx,
-                                      (self_expr, _perm): (
-                                    vir::ExprSnap<'vir>,
-                                    vir::ExprPerm<'vir>,
-                                )| {
-                                    let addr = ref_domain.deref_access(self_expr.downcast_ty());
-                                    let perm_field = immref_impure.perm_field(addr);
-                                    let expr =
-                                        vcx.mk_eq_expr(vcx.mk_old_expr(perm_field), perm_field);
-                                    expr.kind
-                                },
-                            ),
-                        ));
-                    }
-                    // if let Some(new_projection) =
-                    //     LifetimeProjection::new(inner_ty, task_key.region(()), None, ())
-                    // {
-                    //     let inner_indirect =
-                    //         deps.require_dep::<IndirectPredicatesWandRhsEnc>(new_projection)?;
-                    //     predicate_applications.extend(
-                    //         inner_indirect
-                    //             .predicate_applications
-                    //             .into_iter()
-                    //             .map(|inner_expr| {
-                    //                 vcx.mk_lazy_expr(
-                    //                     "ref_inner_indirect",
-                    //                     vir::TYPE_BOOL,
-                    //                     Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
-                    //                         let expr = inner_expr
-                    //                             .reify(
-                    //                                 vcx,
-                    //                                 inner_impure.ref_to_snap(
-                    //                                     ref_domain
-                    //                                         .deref_access(self_expr.downcast_ty()),
-                    //                                 ),
-                    //                             )
-                    //                             .kind;
-                    //                         tracing::debug!(
-                    //                             ?expr,
-                    //                             "Instantiated ref_inner_indirect lazy expr"
-                    //                         );
-                    //                         expr
-                    //                     }),
-                    //                 )
-                    //             }),
-                    //     );
-                    // }
-                }
-                TySpecifics::StructLike(data) => {
-                    // TODO: invalid recursion here if the defined struct is
-                    // recursive!
-                    for (accessor, inner_expr) in collect_field_predicates(data, deps)? {
-                        predicate_applications.push(vcx.mk_lazy_expr(
-                            "struct_field_indirect",
-                            vir::TYPE_BOOL,
-                            Box::new(
-                                move |vcx,
-                                      (self_expr, perm): (
-                                    vir::ExprSnap<'vir>,
-                                    vir::ExprPerm<'vir>,
-                                )| {
-                                    inner_expr
-                                        .reify(vcx, (accessor.read(self_expr.downcast_ty()), perm))
-                                        .kind
-                                },
-                            ),
-                        ));
-                    }
-                }
-                TySpecifics::EnumLike(data) => {
-                    let snap_to_discr_snap = data.data.1.snap_to_discr_snap;
-
-                    let variant_preds = data
-                        .variants
-                        .into_iter()
-                        .map(|variant| {
-                            let fields = collect_field_predicates(variant.inner, deps)?;
-                            Ok((variant.data.1.discr, fields))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-
-                    if variant_preds.is_empty() {
-                        return Ok(((), IndirectPredicatesWandRhsEncOutputRef::new(vec![])));
-                    }
-
-                    predicate_applications.push(
-                        vcx.mk_lazy_expr(
                             "enum_variant_indirect",
                             vir::TYPE_BOOL,
                             Box::new(
@@ -520,11 +534,11 @@ impl TaskEncoder for IndirectPredicatesWandRhsEnc {
                                         .kind
                                 },
                             ),
-                        ),
-                    );
-                }
-                _ => (),
-            };
+                        ));
+                    }
+                    _ => (),
+                };
+            }
             Ok((
                 (),
                 IndirectPredicatesWandRhsEncOutputRef::new(predicate_applications),
