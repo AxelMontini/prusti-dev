@@ -10,7 +10,7 @@ use pcg::{
         borrow_pcg_expansion::BorrowPcgExpansion,
         edge::{
             abstraction::{AbstractionEdge, FunctionCallOrLoop},
-            borrow_flow::BorrowFlowEdgeKind,
+            borrow_flow::{BorrowFlowEdgeKind, OperandType},
             kind::BorrowPcgEdgeKind,
         },
         region_projection::PlaceOrConst,
@@ -832,15 +832,18 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 // We must unfold it AFTER unbinding with the magic wand.
                 self.unbind_unblock(borrow.assigned_ref(), borrow.blocked_place(), label, true);
             }
+            // TODO: How to tell if long() (source) is a &T or &mut T?
+            // Only way I know is to see if it's a move or copy...
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_add()
-                    && let BorrowFlowEdgeKind::Assignment(_assignment_data) =
-                        borrow_flow.kind() =>
+                    && let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
+                    && assignment_data.operand_type() == OperandType::Copy =>
             {
                 // TODO: What other conditions ^^^ ???
                 let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
                     unreachable!();
                 };
+
                 // src is an immref. It must be dereferenced (shadow) before binding.
                 let src = src.as_local_place().unwrap();
                 // let dst = borrow_flow.short().base();
@@ -850,8 +853,8 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_remove()
-                    && let BorrowFlowEdgeKind::Assignment(_assignment_data) =
-                        borrow_flow.kind() =>
+                    && let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
+                    && assignment_data.operand_type() == OperandType::Copy =>
             {
                 // TODO: What other conditions ^^^ ???
                 let PlaceOrConst::Place(src) = borrow_flow.long().base() else {

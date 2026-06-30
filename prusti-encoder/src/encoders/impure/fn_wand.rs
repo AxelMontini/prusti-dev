@@ -31,6 +31,7 @@ pub enum WandEncError {
 }
 
 impl<'vir, E: TaskEncoder> ImpureEncVisitor<'vir, '_, E> {
+    #[tracing::instrument(skip(self), fields(?self.def_id), ret)]
     pub fn package_wands(
         &mut self,
         final_borrow_state: &BorrowsState<'_, 'vir>,
