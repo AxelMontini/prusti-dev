@@ -8,10 +8,15 @@ use crate::encoders::{
         indirect_wand::{IndirectPredicatesWandLhsEnc, IndirectPredicatesWandRhsEnc},
     },
 };
-use pcg::borrow_pcg::{
-    FunctionData, FunctionShape, FunctionShapeInput, FunctionShapeNode, FunctionShapeOutput,
-    MakeFunctionShapeError, region_projection::Generalized, state::BorrowsState,
-    unblock_graph::UnblockGraph,
+use pcg::{
+    borrow_pcg::{
+        FunctionData, FunctionShape, FunctionShapeInput, FunctionShapeNode, FunctionShapeOutput,
+        MakeFunctionShapeError,
+        region_projection::{ExtractRegionsCtxt, Generalized},
+        state::BorrowsState,
+        unblock_graph::UnblockGraph,
+    },
+    utils::Place,
 };
 use prusti_interface::PrustiError;
 use prusti_rustc_interface::{
@@ -52,6 +57,8 @@ impl<'vir, E: TaskEncoder> ImpureEncVisitor<'vir, '_, E> {
             )
         });
 
+        // let fn_sig = self.wands.fn_sig(self.vcx, None);
+
         for wand_data in self.wands.viper_wands() {
             let Some((wand, lhs_perms, rhs_perms)) = self.wands.mk_wand(
                 &wand_data,
@@ -77,11 +84,26 @@ impl<'vir, E: TaskEncoder> ImpureEncVisitor<'vir, '_, E> {
             tracing::debug!(?wand_data, "Wand Data for UnblockGraph");
             let mut package_script = Vec::new();
             for rhs in wand_data.rhs.iter() {
-                let ug = UnblockGraph::for_node(
-                    mir::Place::from(rhs.mir_local()),
-                    final_borrow_state,
-                    self.pcg_ctxt(),
-                );
+                // let fn_node = rhs.to_function_shape_node();
+                // let arg_ty = fn_node.ty(fn_sig);
+                // let place = Place::from(mir::Place::from(rhs.mir_local()));
+                // let decomp = RustTyDecomposition::from_ty(arg_ty, self.wands.g_params(self.vcx));
+                // let lifetimes = self.pcg_ctxt().extract_regions(arg_ty);
+                // TODO: Error handle
+                // let region = match lifetimes.get(rhs.region_idx()).unwrap() {
+                //     &GeneralizedLifetime::Region(r) => r,
+                //     &GeneralizedLifetime::RegionsIn(_) => {
+                //         todo!("get unblock graph input node even in this case")
+                //     }
+                // };
+                let b = self
+                    .pcg_ctxt()
+                    .extract_lifetime_projections(Place::from(rhs.mir_local()))
+                    .into_iter()
+                    .next()
+                    .unwrap(); // TODO: Actually get the correct one
+                tracing::debug!(?b, "b");
+                let ug = UnblockGraph::for_node(b, final_borrow_state, self.pcg_ctxt());
                 let fbr_formatted = format!("{final_borrow_state:#?}");
                 tracing::debug!(
                     ?ug,

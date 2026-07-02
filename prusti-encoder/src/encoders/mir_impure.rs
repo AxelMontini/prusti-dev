@@ -323,10 +323,8 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     .vcx()
                     .mk_bin_op_expr(
                         vir::BinOpKind::Mul,
-                        self.vcx()
-                            .mk_const_expr(vir::ConstData::Int(2))
-                            .downcast_ty(),
                         inner.deref_perm_field(place_ref, None),
+                        self.vcx().mk_perm::<2, 1>(),
                     )
                     .downcast_ty();
 
