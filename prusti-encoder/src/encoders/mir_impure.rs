@@ -986,6 +986,8 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             BorrowPcgEdgeKind::BorrowPcgExpansion(expansion)
                 if let PcgNode::Place(base) = expansion.base() =>
             {
+                // TODO: Axel: is the place ALWAYS borrowed?
+                // TODO: Pass permission here
                 self.fold_or_unfold(
                     base,
                     FoldOrUnfold::for_action(edge_action),
@@ -1989,6 +1991,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         })
     }
 
+    #[tracing::instrument(skip(self), fields(current_terminator = ?self.current_terminator, def_id = ?self.def_id), ret(Debug))]
     fn visit_terminator(
         &mut self,
         terminator: &mir::Terminator<'vir>,
@@ -2421,7 +2424,11 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 self.vcx.mk_assume_false_stmt()
             }),
         };
-        assert!(self.current_terminator.replace(terminator).is_none());
+        let old_term = self.current_terminator.replace(terminator);
+        assert!(
+            old_term.is_none(),
+            "Expected previous current_terminator to not be set, but it was {old_term:?}"
+        );
         Ok(())
     }
 }

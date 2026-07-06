@@ -476,7 +476,7 @@ impl<'vir> TyUseImpureStruct<'vir> {
         let unfold = vir::with_vcx(|vcx| vcx.mk_unfold_stmt(pred_app));
         [unfold]
             .into_iter()
-            .chain(self.cast_to_caller_ctx(self_ref))
+            .chain(self.cast_to_caller_ctx(self_ref)) // TODO: Axel: Should this also take perm?
     }
 
     fn cast_to_caller_ctx(
