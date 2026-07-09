@@ -1,7 +1,7 @@
 use crate::encoders::ty::{
     RustImmRef, RustTyDatas,
     data::TyData,
-    generics::GParams,
+    generics::{AliasUtils, AliasUtilsEnc, GParams},
     impure::{PredicateBuilder, TyImpureEnc, TyImpureImmRef, TyImpureImmRefData},
     pure::{AdtBuilder, PureTyDatas, TyPureEnc, TyPureImmRef, TyPureImmRefData},
 };
@@ -56,6 +56,7 @@ pub(crate) fn ty_impure<'vir>(
     let ref_self_decl = builder.ref_self_decl();
     let ref_self = builder.vcx.mk_local_ex(ref_self_decl);
 
+    let AliasUtils { perm_field } = deps.require_dep::<AliasUtilsEnc>(())?;
     let d = data.0.decompose(GParams::empty());
     let generic = deps.require_ref::<TyImpureEnc>(d.ty)?;
 
@@ -82,7 +83,6 @@ pub(crate) fn ty_impure<'vir>(
 
     // fields
     let ref_field = builder.field("val", snap_type);
-    let perm_field = builder.field("perm_owned", vir::TYPE_PERM);
     // let ever_changing_shadow_field = builder.field("ever_changing_shadow", vir::TYPE_REF); //
     // This is added once per function
 
@@ -311,22 +311,10 @@ pub(crate) fn ty_impure<'vir>(
         ],
     );
 
-    let refresh_next_shadow = builder.inner.function(
-        "refresh_next_shadow",
-        vir::TYPE_REF,
-        vir::TYPE_REF,
-        (ref_source_decl,),
-        &[],
-        &[],
-        None,
-    );
-
     Ok(TyImpureImmRefData {
         pure,
-        perm_field,
         bind_block,
         unbind_unblock,
         arbitrary_value,
-        refresh_next_shadow,
     })
 }

@@ -88,6 +88,9 @@ pub fn test_entrypoint<'tcx>(
     program.header("MIR builtins");
     crate::encoders::MirBuiltinEnc::emit_outputs(&mut program);
 
+    program.header("Alias utils"); // TODO: Axel: Do these go here?
+    crate::encoders::ty::generics::AliasUtilsEnc::emit_outputs(&mut program);
+
     program.header("pure generic casts");
     GArgsCastEnc::<Pure>::emit_outputs(&mut program);
 

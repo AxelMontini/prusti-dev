@@ -263,7 +263,7 @@ impl<'vir> WandEncOutput<'vir> {
                 .unwrap_or_else(|| vcx.mk_full_perm());
             let perm_value = match data.specifics {
                 crate::encoders::ty::TySpecifics::ImmRef(data) => {
-                    data.perm_field(data.deref_access_snap(local_snap.downcast_ty(), None))
+                    data.perm_field(data.deref_access_snap(local_snap.downcast_ty(), None), None)
                 }
                 _ => vcx.mk_no_perm(),
             };

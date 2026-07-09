@@ -5,8 +5,8 @@ use vir::{CastType, ExprRef, PredicateIdn};
 use crate::encoders::{
     Impure,
     ty::{
-        LazyRustTy, RustTyDatas,
-        generics::{GArgs, GArgsCastEnc, GArgsTyEnc, GParams},
+        LazyRustTy, RustTy, RustTyDatas,
+        generics::{AliasUtils, AliasUtilsEnc, GArgs, GArgsCastEnc, GArgsTyEnc, GParams},
     },
 };
 
@@ -55,6 +55,7 @@ pub struct TyUseImpureImmRef<'vir> {
     #[allow(dead_code)]
     impure: <ImpureTyDatas as TyDatas<'vir>>::ImmRefData,
     ref_to_snap: vir::FunctionIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap), vir::Snap>,
+    alias: AliasUtils<'vir>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,8 +157,8 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
             TySpecifics::Primitive(..) => TySpecifics::mk_primitive(()),
             TySpecifics::ImmRef(data) => {
                 let caster = self.encode_normalized(*data.0, ty.0.params);
-                tracing::debug!(?caster, "ImmRef Caster");
                 TySpecifics::mk_immref(TyUseImpureImmRef {
+                    alias: self.deps.require_ref::<AliasUtilsEnc>(()).unwrap(),
                     caster,
                     args: self.args_t,
                     impure: *data.1,
@@ -184,6 +185,7 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
             }
             TySpecifics::Builtin(..) => TySpecifics::mk_builtin(()),
         };
+
         let data = TyUseImpureData {
             args: self.args_t,
             impure: *ty.1,
@@ -277,6 +279,7 @@ impl<'vir> TyUseImpureData<'vir> {
         self_ref: vir::ExprRef<'vir>,
         self_new_snap: vir::ExprSnap<'vir>,
     ) -> vir::Stmt<'vir> {
+        // TODO: Should this go here?
         vcx.alloc(vir::StmtData::new(vcx.alloc((self.impure.method_assign)(
             self_ref,
             self.args.get_ty(),
@@ -323,6 +326,7 @@ impl<'vir> TyUseImpureData<'vir> {
 
 impl<'vir> TyData<'vir, UseImpureTyDatas> {
     /// Fold the predicate (including generic casts).
+    /// If `perm == None`, then `perm_field(self_ref)` is used.
     pub fn fold(
         &self,
         variant: Option<abi::VariantIdx>,
@@ -362,7 +366,7 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                     .collect()
             }
             TySpecifics::ImmRef(data) => data
-                .fold_shadow(self_ref, label, perm)
+                .fold_shadow(self_ref, label, /*perm*/ None) // TODO: Axel: See same in unfold
                 .into_iter()
                 .collect(),
             TySpecifics::MutRef(data) => data.fold(self_ref, label).into_iter().collect(),
@@ -375,6 +379,7 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
     }
 
     /// Unfold the predicate (including generic casts).
+    /// If `perm == None`, then `perm_field(self_ref)` is used.
     pub fn unfold(
         &self,
         variant: Option<abi::VariantIdx>,
@@ -415,8 +420,9 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                 )
                 .collect()
             }
+            // TODO: Axel: actually ignore perm? Due to Deref x -> *x
             TySpecifics::ImmRef(data) => data
-                .unfold_shadow(self_ref, old, perm)
+                .unfold_shadow(self_ref, old, /*perm*/ None)
                 .into_iter()
                 .collect(),
             TySpecifics::MutRef(data) => data.unfold(self_ref, old).into_iter().collect(),
@@ -562,25 +568,30 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         vir::with_vcx(|vcx| vcx.maybe_apply_label(deref, label))
     }
 
-    pub fn perm_field(&self, self_ref: vir::ExprRef<'vir>) -> vir::ExprPerm<'vir> {
-        vir::with_vcx(|vcx| vcx.mk_field_expr(self_ref, self.impure.perm_field))
+    pub fn perm_field(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        label: Option<vir::OldLabel<'vir>>,
+    ) -> vir::ExprPerm<'vir> {
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(self.alias.perm_field(self_ref), label))
     }
 
     pub fn acc_perm_field(
         &self,
         self_ref: vir::ExprRef<'vir>,
-        p: Option<vir::ExprPerm<'vir>>,
+        label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprBool<'vir> {
-        vir::with_vcx(|vcx| vcx.mk_acc_field_expr(self_ref, self.impure.perm_field, p))
+        vir::with_vcx(|vcx| vcx.maybe_apply_label(self.alias.acc_perm_field(self_ref, None), label))
     }
 
+    /// old[label]((*self_ref).perm_field)
     pub fn deref_perm_field(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprPerm<'vir> {
-        let deref = self.deref_access(self_ref, label);
-        self.perm_field(deref)
+        let deref = self.deref_access(self_ref, None);
+        self.perm_field(deref, label)
     }
 
     pub fn blocked_perm_field(
@@ -588,8 +599,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
     ) -> vir::ExprPerm<'vir> {
-        let deref = self.blocked_access(self_ref, label);
-        self.perm_field(deref)
+        let deref = self.blocked_access(self_ref, None);
+        self.perm_field(deref, label)
     }
 
     pub fn prim_to_snap_assign(
@@ -663,10 +674,8 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         blocked: vir::ExprRef<'vir>,
         perm: Option<vir::ExprPerm<'vir>>,
     ) -> vir::ExprRef<'vir> {
-        vir::with_vcx(|vcx| {
-            let perm = perm.unwrap_or_else(|| vcx.mk_field_expr(blocked, self.impure.perm_field));
-            self.impure.pure.shadow_for.call()(blocked, perm)
-        })
+        let perm = perm.unwrap_or_else(|| self.perm_field(blocked, None));
+        self.impure.pure.shadow_for.call()(blocked, perm)
     }
 
     /// Binds the `source` to `target`.

@@ -50,7 +50,7 @@ use crate::encoders::{
     mir_shared::PureRvalueEnc,
     ty::{
         RustTyDecomposition,
-        generics::{GParams, GenericParamsEnc},
+        generics::{AliasUtilsEnc, GParams, GenericParamsEnc},
         use_impure::TyUseImpure,
         use_pure::{TyUsePure, TyUsePureEnc},
     },
@@ -459,7 +459,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
                     let inner = p_rvalue_ty.expect_immref();
                     let place_ref = place_expr.expr.address;
-                    let perm = inner.perm_field(place_ref);
+                    let perm = inner.perm_field(place_ref, None);
 
                     EncodedRvalue {
                         expr: inner.prim_to_snap_assign(place_ref, perm).upcast_ty(),
@@ -469,7 +469,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             // must have `acc(p_Param(rhs, ty), rhs.perm_field)`. It then gets
                             // halved by binding.
                             // NOTE: `perm` parameter is ignored
-                            let perm = inner.perm_field(place_ref);
+                            let perm = inner.perm_field(place_ref, None);
                             let stmts = inner.fold_actual(lhs_place, None, Some(perm)).into_iter();
                             // Bind shadow ref and blocked place
                             let stmts = stmts.chain(
@@ -728,6 +728,14 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .maybe_apply_label(ref_p.expr.expect_predicate(), label);
         let data = self.ty_use_impure(place_ty.ty);
 
+        // TODO: Axel: yeah... what happens with nested structs again?
+        let perm_field = self
+            .deps
+            .require_ref::<AliasUtilsEnc>(())
+            .unwrap()
+            .perm_field;
+        let perm = self.vcx().mk_field_expr(ref_p, perm_field); // TODO: Axel: Label?
+
         // TODO: use `guide` from `BorrowPcgExpansion`
         let index = expansion.and_then(|expansion| {
             match expansion.expansion()[0].place().projection.last() {
@@ -748,8 +756,12 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         });
 
         let stmts = match fold_or_unfold {
-            FoldOrUnfold::Unfold => data.unfold(place_ty.variant_index, ref_p, index, None, label),
-            FoldOrUnfold::Fold => data.fold(place_ty.variant_index, ref_p, index, None, label),
+            FoldOrUnfold::Unfold => {
+                data.unfold(place_ty.variant_index, ref_p, index, Some(perm), label)
+            }
+            FoldOrUnfold::Fold => {
+                data.fold(place_ty.variant_index, ref_p, index, Some(perm), label)
+            }
         };
         self.stmts(stmts);
     }
@@ -832,6 +844,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             }
             // TODO: How to tell if long() (source) is a &T or &mut T?
             // Only way I know is to see if it's a move or copy...
+            // TODO: This may not even be right
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_add()
                     && let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
@@ -1858,11 +1871,14 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(added_stmt_count), err(Debug))]
     fn visit_statement(
         &mut self,
         statement: &mir::Statement<'vir>,
         location: mir::Location,
     ) -> Result<(), EncodeFullError<'vir, E>> {
+        let start_stmt_count = self.current_stmts.as_ref().unwrap().len();
+
         self.vcx.with_span(statement.source_info.span, |_vcx| {
             self.deps().check_cycle()?;
 
@@ -1934,14 +1950,20 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
                     match rval_enc {
                         Ok(rval_enc) => {
+                            let perm_field = self.deps().require_dep::<AliasUtilsEnc>(())?.perm_field;
                             let dest_ty = dest.ty(self.local_decls, self.vcx.tcx());
                             assert!(dest_ty.variant_index.is_none());
                             let dest_ty_out = self.ty_use_impure(dest_ty.ty);
                             let method_assign_app =
                                 dest_ty_out.apply_method_assign(self.vcx, proj_enc, rval_enc.expr);
                             let post_fold_stmts = rval_enc.post_fold_stmts(proj_enc);
-                            tracing::debug!(?method_assign_app, ?post_fold_stmts, ?proj_enc, ?dest_ty, "Encoding Assignment: apply method assign and post fold statements");
+                            let perm_field_inhale = self.vcx().mk_inhale_stmt(
+                                self.vcx().mk_conj(&[
+                                    self.vcx().mk_acc_field_expr(proj_enc, perm_field, None),
+                                    self.vcx().mk_eq_expr(self.vcx().mk_full_perm(), self.vcx().mk_field_expr(proj_enc, perm_field))
+                            ]));
                             self.stmt(method_assign_app);
+                            self.stmt(perm_field_inhale);
                             self.stmts(post_fold_stmts);
                         }
                         Err(_) => {
@@ -1987,6 +2009,9 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     statement.kind
                 ),
             }
+
+            let added_stmts_count = self.current_stmts.as_ref().unwrap().len()-start_stmt_count;
+            tracing::Span::current().record("added_stmt_count", added_stmts_count);
             Ok(())
         })
     }

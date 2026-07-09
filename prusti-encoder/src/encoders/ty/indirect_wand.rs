@@ -158,8 +158,8 @@ impl TaskEncoder for IndirectPredicatesWandLhsEnc {
                                         vir::ExprPerm<'vir>,
                                     )| {
                                         let addr = ref_domain.deref_access(self_expr.downcast_ty());
-                                        let expr =
-                                            vcx.mk_eq_expr(immref_impure.perm_field(addr), perm);
+                                        let expr = vcx
+                                            .mk_eq_expr(immref_impure.perm_field(addr, None), perm);
                                         expr.kind
                                     },
                                 ),
@@ -418,7 +418,7 @@ impl TaskEncoder for IndirectPredicatesWandRhsEnc {
                                         vir::ExprPerm<'vir>,
                                     )| {
                                         let addr = ref_domain.deref_access(self_expr.downcast_ty());
-                                        let perm_field = immref_impure.perm_field(addr);
+                                        let perm_field = immref_impure.perm_field(addr, None);
                                         let expr = vcx.mk_eq_expr(perm, perm_field);
                                         expr.kind
                                     },

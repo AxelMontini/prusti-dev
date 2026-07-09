@@ -42,7 +42,6 @@ pub type TyImpureBuiltin<'vir> = <ImpureTyDatas as TyDatas<'vir>>::BuiltinData;
 #[derive(Debug, Clone, Copy)]
 pub struct TyImpureImmRefData<'vir> {
     pub pure: <PureTyDatas as TyDatas<'vir>>::ImmRefData,
-    pub perm_field: vir::FieldPerm<'vir>,
     /// Args: `(target, source, ...generics)`
     ///
     /// Halves `source.perm_field`, takes away that amount of access from `p_Param(source, ...)` and
@@ -59,8 +58,6 @@ pub struct TyImpureImmRefData<'vir> {
     /// the initial step of an ImmRef assignment.
     /// Args: `blocked_place`, `shadow_place`
     pub arbitrary_value: vir::FunctionIdn<'vir, (vir::Ref, vir::Perm), vir::CSnap>,
-    /// Returns a new fresh shadow based on the value of the old one.
-    pub refresh_next_shadow: vir::FunctionIdn<'vir, vir::Ref, vir::Ref>,
 }
 
 #[derive(Debug, Clone, Copy)]

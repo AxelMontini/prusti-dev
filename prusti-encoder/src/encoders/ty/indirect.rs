@@ -144,13 +144,13 @@ impl TaskEncoder for IndirectPredicatesEnc {
                                     .mk_bin_op_expr(
                                         vir::BinOpKind::CmpLt,
                                         vcx.mk_no_perm(),
-                                        immref_impure.perm_field(addr),
+                                        immref_impure.perm_field(addr, None),
                                     )
                                     .downcast_ty();
                                 let field_bound_le_half = vcx
                                     .mk_bin_op_expr(
                                         vir::BinOpKind::CmpLe,
-                                        immref_impure.perm_field(addr),
+                                        immref_impure.perm_field(addr, None),
                                         vcx.mk_perm::<1, 2>(),
                                     )
                                     .downcast_ty();
@@ -167,7 +167,7 @@ impl TaskEncoder for IndirectPredicatesEnc {
                             vir::TYPE_BOOL,
                             Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
                                 let addr = ref_domain.deref_access(self_expr.downcast_ty());
-                                let perm = immref_impure.perm_field(addr);
+                                let perm = immref_impure.perm_field(addr, None);
                                 let expr = inner_impure.ref_to_pred(vcx, addr, Some(perm)).kind;
                                 tracing::debug!(?expr, "Instantiated ref_indirect lazy expr");
                                 expr
