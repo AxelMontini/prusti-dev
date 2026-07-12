@@ -92,6 +92,9 @@ impl Debug for ConstData {
             Self::Bool(b) => write!(f, "{b}"),
             Self::Int(n) => write!(f, "{n}"),
             Self::Wildcard => write!(f, "wildcard"),
+            Self::FullPerm => write!(f, "write"),
+            Self::NoPerm => write!(f, "wildcard"),
+            Self::Perm(a, b) => write!(f, "({a}/{b})"),
             Self::Null => write!(f, "null"),
         }
     }
@@ -445,6 +448,7 @@ impl<'vir, Curr, Next> Debug for StmtKindGenData<'vir, Curr, Next> {
             Self::Label(label) => write!(f, "label {label}"),
             Self::Comment(info) => write!(f, "// {info}"),
             Self::Dummy(info) => write!(f, "// {info}"),
+            Self::Assert(data) => write!(f, "assert {data:indent$?}"),
         }
     }
 }

@@ -104,6 +104,7 @@ impl TaskEncoder for MirPureEnc {
         )
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,
@@ -966,7 +967,12 @@ impl<'vir: 'enc, 'enc> Enc<'vir, 'enc> {
                     e_rvalue_ty.prim_to_snap(place_ref, metadata, encoded_place.snap)
                 } else {
                     let e_rvalue_ty = rvalue_snapshot_encoding.expect_immref();
-                    e_rvalue_ty.prim_to_snap(place_ref, metadata, encoded_place.snap)
+                    e_rvalue_ty.prim_to_snap(
+                        self.vcx.mk_null().lazy(),
+                        place_ref,
+                        metadata,
+                        encoded_place.snap,
+                    )
                 };
                 Ok(snap.upcast_ty())
             }

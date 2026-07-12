@@ -96,6 +96,9 @@ pub fn test_entrypoint<'tcx>(
     crate::encoders::MetadataCastAxiomEnc::emit_outputs(&mut program);
     crate::encoders::ValueCastAxiomEnc::emit_outputs(&mut program);
 
+    program.header("Alias utils"); // TODO: Axel: Do these go here?
+    crate::encoders::ty::generics::AliasUtilsEnc::emit_outputs(&mut program);
+
     program.header("pure generic casts");
     GArgsCastEnc::<Pure>::emit_outputs(&mut program);
 

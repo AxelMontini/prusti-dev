@@ -115,7 +115,14 @@ impl From<&mir::BinOp> for BinOpKind {
 pub enum ConstData {
     Bool(bool),
     Int(u128), // TODO: what about negative numbers? larger numbers?
+    /// Corresponds to any fraction greater than `0/1`, and less-or-equal than `1/1`
     Wildcard,
+    /// Corresponds to `1/1`
+    FullPerm,
+    /// Corresponds to `0/1`
+    NoPerm,
+    /// Any Perm const, with numerator and denominator.
+    Perm(u64, u64), // XXX: Correct int type?
     Null,
 }
 
@@ -124,7 +131,10 @@ impl ConstData {
         match self {
             ConstData::Bool(_) => crate::TYPE_BOOL.upcast_ty(),
             ConstData::Int(_) => crate::TYPE_INT.upcast_ty(),
-            ConstData::Wildcard => crate::TYPE_PERM.upcast_ty(),
+            ConstData::Wildcard
+            | ConstData::FullPerm
+            | ConstData::NoPerm
+            | ConstData::Perm(_, _) => crate::TYPE_PERM.upcast_ty(),
             ConstData::Null => crate::TYPE_REF.upcast_ty(),
         }
     }

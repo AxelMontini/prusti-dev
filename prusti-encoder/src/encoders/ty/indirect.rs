@@ -78,6 +78,7 @@ impl TaskEncoder for IndirectPredicatesEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,
@@ -115,10 +116,7 @@ impl TaskEncoder for IndirectPredicatesEnc {
                 // ignore for now). Plus it skips unsupported types if they
                 // don't have lifetimes.
                 _ if ty.args.args().is_empty() => (),
-                TySpecifics::Primitive(_)
-                | TySpecifics::ImmRef(_)
-                | TySpecifics::Raw(_)
-                | TySpecifics::Builtin(_) => (),
+                TySpecifics::Primitive(_) | TySpecifics::Raw(_) | TySpecifics::Builtin(_) => (),
                 // TODO: it's not valid to have nothing for these. We should fix
                 // this by using an opaque predicate to represent potential
                 // indirect stuff. For example:
@@ -127,17 +125,52 @@ impl TaskEncoder for IndirectPredicatesEnc {
                 // case we would want a wand with `i32(result) --* opaque_behind_a(x)`.
                 // This is why we should return `opaque_behind_a(x)` here.
                 TySpecifics::Param(_) | TySpecifics::Opaque(_) | TySpecifics::ArrayLike(_) => (),
-                TySpecifics::MutRef((data, ref_domain)) => {
+                TySpecifics::ImmRef((data, ref_domain)) => {
+                    // TODO: De-duplicate immref and mutref code? Almost the same except perms
+                    // TODO: USE PROPER PERMISSIONS!!! Not write
+                    assert_eq!(ty.args.args().len(), 2);
+                    let immref_impure = deps.require_dep::<TyUseImpureEnc>(ty)?.expect_immref();
                     let inner_ty = data.referent.decompose_context(ty.ty.params, ty.args);
                     let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
                     let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
                     if ref_region == task_region {
                         predicate_applications.push(vcx.mk_lazy_expr(
+                            "ref_perm_field_indirect",
+                            vir::TYPE_BOOL,
+                            Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
+                                let addr = ref_domain.deref_access(self_expr.downcast_ty());
+                                let acc_field = immref_impure.acc_perm_field(addr, None);
+                                let field_bound_nonzero = vcx
+                                    .mk_bin_op_expr(
+                                        vir::BinOpKind::CmpLt,
+                                        vcx.mk_no_perm(),
+                                        immref_impure.perm_field(addr, None),
+                                    )
+                                    .downcast_ty();
+                                let field_bound_le_half = vcx
+                                    .mk_bin_op_expr(
+                                        vir::BinOpKind::CmpLe,
+                                        immref_impure.perm_field(addr, None),
+                                        vcx.mk_perm::<1, 2>(),
+                                    )
+                                    .downcast_ty();
+                                let expr = vcx.mk_conj(&[
+                                    acc_field,
+                                    field_bound_nonzero,
+                                    field_bound_le_half,
+                                ]);
+                                expr.kind
+                            }),
+                        ));
+                        predicate_applications.push(vcx.mk_lazy_expr(
                             "ref_indirect",
                             vir::TYPE_BOOL,
                             Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
                                 let addr = ref_domain.deref_access(self_expr.downcast_ty());
-                                inner_impure.ref_to_pred(vcx, addr, None).kind
+                                let perm = immref_impure.perm_field(addr, None);
+                                let expr = inner_impure.ref_to_pred(vcx, addr, Some(perm)).kind;
+                                tracing::debug!(?expr, "Instantiated ref_indirect lazy expr");
+                                expr
                             }),
                         ));
                     }
@@ -155,7 +188,7 @@ impl TaskEncoder for IndirectPredicatesEnc {
                                         "ref_inner_indirect",
                                         vir::TYPE_BOOL,
                                         Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
-                                            inner_expr
+                                            let expr = inner_expr
                                                 .reify(
                                                     vcx,
                                                     inner_impure.ref_to_snap(
@@ -163,7 +196,62 @@ impl TaskEncoder for IndirectPredicatesEnc {
                                                             .deref_access(self_expr.downcast_ty()),
                                                     ),
                                                 )
-                                                .kind
+                                                .kind;
+                                            tracing::debug!(
+                                                ?expr,
+                                                "Instantiated ref_inner_indirect lazy expr"
+                                            );
+                                            expr
+                                        }),
+                                    )
+                                }),
+                        );
+                    }
+                }
+                TySpecifics::MutRef((data, ref_domain)) => {
+                    let inner_ty = data.referent.decompose_context(ty.ty.params, ty.args);
+                    let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
+                    let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
+                    if ref_region == task_region {
+                        predicate_applications.push(vcx.mk_lazy_expr(
+                            "ref_indirect",
+                            vir::TYPE_BOOL,
+                            Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
+                                let addr = ref_domain.deref_access(self_expr.downcast_ty());
+                                let expr = inner_impure.ref_to_pred(vcx, addr, None).kind;
+                                tracing::debug!(?expr, "Instantiated ref_indirect lazy expr");
+                                expr
+                            }),
+                        ));
+                    }
+                    if let Some(new_projection) =
+                        LifetimeProjection::new(inner_ty, task_region, None, PrustiPcgCtxt)
+                    {
+                        let inner_indirect =
+                            deps.require_dep::<IndirectPredicatesEnc>(new_projection)?;
+                        predicate_applications.extend(
+                            inner_indirect
+                                .predicate_applications
+                                .into_iter()
+                                .map(|inner_expr| {
+                                    vcx.mk_lazy_expr(
+                                        "ref_inner_indirect",
+                                        vir::TYPE_BOOL,
+                                        Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
+                                            let expr = inner_expr
+                                                .reify(
+                                                    vcx,
+                                                    inner_impure.ref_to_snap(
+                                                        ref_domain
+                                                            .deref_access(self_expr.downcast_ty()),
+                                                    ),
+                                                )
+                                                .kind;
+                                            tracing::debug!(
+                                                ?expr,
+                                                "Instantiated ref_inner_indirect lazy expr"
+                                            );
+                                            expr
                                         }),
                                     )
                                 }),

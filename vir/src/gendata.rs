@@ -242,6 +242,18 @@ impl<'tcx> crate::VirCtxt<'tcx> {
         const_expr!(&ExprKindGenData::Const(&ConstData::Wildcard), Perm => TypePerm)
     }
 
+    pub const fn mk_full_perm<'vir>(&'vir self) -> ExprPerm<'vir> {
+        const_expr!(&ExprKindGenData::Const(&ConstData::FullPerm), Perm => TypePerm)
+    }
+
+    pub const fn mk_no_perm<'vir>(&'vir self) -> ExprPerm<'vir> {
+        const_expr!(&ExprKindGenData::Const(&ConstData::NoPerm), Perm => TypePerm)
+    }
+
+    pub const fn mk_perm<'vir, const NUM: u64, const DENOM: u64>(&'vir self) -> ExprPerm<'vir> {
+        const_expr!(&ExprKindGenData::Const(&ConstData::Perm(NUM, DENOM)), Perm => TypePerm)
+    }
+
     pub const fn mk_null<'vir>(&'vir self) -> ExprRef<'vir> {
         const_expr!(&ExprKindGenData::Const(&ConstData::Null), Ref => TypeRef)
     }
@@ -506,6 +518,7 @@ pub enum StmtKindGenData<'vir, Curr, Next> {
     Label(&'vir str),
     Comment(&'vir str),
     Dummy(&'vir str),
+    Assert(ExprGenBool<'vir, Curr, Next>),
 }
 
 impl<'vir, Curr, Next> StmtKindGenData<'vir, Curr, Next> {

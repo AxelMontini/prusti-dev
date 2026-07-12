@@ -144,6 +144,7 @@ impl<'tcx> GParams<'tcx> {
     /// Tries to normalize associated types of the corresponding type. Returns
     /// `Some` if managed to normalize (or there were no associated types), else
     /// returns None.
+    #[tracing::instrument(ret)]
     pub fn try_normalize(self, ty: ty::Ty<'tcx>) -> Option<ty::Ty<'tcx>> {
         use prusti_rustc_interface::{
             middle::ty,

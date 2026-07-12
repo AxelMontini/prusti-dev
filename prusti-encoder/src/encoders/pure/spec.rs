@@ -89,7 +89,7 @@ pub struct EncodedPledge<'vir> {
     pub expiry_postcondition: PledgeExpr<'vir>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MirSpecEncOutput<'vir> {
     pub pres: Vec<vir::ExprBool<'vir>>,
     pub posts: Vec<vir::ExprBool<'vir>>,
