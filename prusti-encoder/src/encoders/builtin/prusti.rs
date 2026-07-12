@@ -1136,7 +1136,12 @@ impl<'enc, 'vir> BuiltinCtxt<'enc, 'vir> {
         })?;
         Ok(self
             .e_output_immref()?
-            .prim_to_snap(self.vcx.mk_null().lazy(), metadata.upcast_ty(), value)
+            .prim_to_snap(
+                self.vcx.mk_null().lazy(),
+                self.vcx.mk_null().lazy(),
+                metadata.upcast_ty(),
+                value,
+            )
             .upcast_ty())
     }
 

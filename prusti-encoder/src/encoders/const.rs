@@ -159,8 +159,10 @@ impl<'enc, 'vir: 'enc> Enc<'enc, 'vir> {
                     prim.prim_to_snap(val)
                 }
                 super::ty::TySpecifics::ImmRef(immref) => {
+                    // FIXME: Most likely wrong encoding, i don't quite get what's being done here
+                    // and why
                     let (addr, metadata, snap) = self.encode_ref_addr_snap(val, ty)?;
-                    immref.prim_to_snap(addr, metadata.upcast_ty(), snap)
+                    immref.prim_to_snap(vcx.mk_null(), addr, metadata.upcast_ty(), snap)
                 }
                 super::ty::TySpecifics::MutRef(mutref) => {
                     let (addr, metadata, snap) = self.encode_ref_addr_snap(val, ty)?;
@@ -340,6 +342,7 @@ impl TaskEncoder for ConstEnc {
         }
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,

@@ -4,6 +4,7 @@ use crate::encoders::ty::{
     pure::{DomainBuilder, TyPureEnc, TyPureParam},
 };
 use task_encoder::{EncodeFullError, TaskEncoderDependencies};
+use vir::CastType;
 
 pub(crate) fn ty_pure<'vir>(
     _data: &RustParam<'vir>,
