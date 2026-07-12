@@ -138,13 +138,18 @@ impl<'vir, D: TyDatas<'vir, PrimitiveData = TyPurePrimData<'vir>>> TyData<'vir, 
 #[derive(Debug, Clone, Copy)]
 pub struct TyPureImmRefData<'vir> {
     /// Construct domain from a `Ref` value.
-    pub(super) prim_to_snap: FunctionIdn<'vir, (vir::Ref, vir::PSnap, vir::PSnap), vir::CSnap>,
-    /// Function to access the referee.
+    pub(super) prim_to_snap:
+        FunctionIdn<'vir, (vir::Ref, vir::Ref, vir::PSnap, vir::PSnap), vir::CSnap>,
+    /// Function to access the shadow referee.
     pub(super) deref_access: AdtDestructor<'vir, vir::CSnap, vir::Ref>,
+    /// Access to the value that is bound to and blocked by this reference.
+    pub(super) blocked_access: AdtDestructor<'vir, vir::CSnap, vir::Ref>,
     /// Function to access the reference metadata (fat pointer).
     pub(super) metadata_access: AdtDestructor<'vir, vir::CSnap, vir::PSnap>,
     /// Function to access the snapshot value.
     pub(super) value_access: AdtDestructor<'vir, vir::CSnap, vir::PSnap>,
+    /// Get the shadow for a certain ref and some permission (usually the current permission available to it).
+    pub(super) shadow_for: FunctionIdn<'vir, (vir::Ref, vir::Perm), vir::Ref>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -242,6 +247,7 @@ impl TaskEncoder for TyPureEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,

@@ -18,7 +18,7 @@ impl<'vir> TyDatas<'vir> for ImpureTyDatas {
     type TyData = TyImpureRef<'vir>;
     type PrimitiveData = ();
     type ArrayData = TyImpureArrayData<'vir>;
-    type ImmRefData = TyImpureImmRefData;
+    type ImmRefData = TyImpureImmRefData<'vir>;
     type MutRefData = TyImpureMutRefData<'vir>;
     type RawData = TyImpureRawData;
     type FieldData = TyImpureFieldData<'vir>;
@@ -26,6 +26,7 @@ impl<'vir> TyDatas<'vir> for ImpureTyDatas {
     type VariantData = TyImpureVariantData<'vir>;
     type EnumData = TyImpureEnumData<'vir>;
     type BuiltinData = ();
+    // type ParamData = TyImpureParamData<'vir>;
 }
 
 pub type TyImpure<'vir> = Ty<'vir, ImpureTyDatas>;
@@ -37,8 +38,29 @@ pub type TyImpureMutRef<'vir> = <ImpureTyDatas as TyDatas<'vir>>::MutRefData;
 pub type TyImpureRaw<'vir> = <ImpureTyDatas as TyDatas<'vir>>::RawData;
 pub type TyImpureBuiltin<'vir> = <ImpureTyDatas as TyDatas<'vir>>::BuiltinData;
 
+// #[derive(Debug, Clone, Copy)]
+// pub struct TyImpureParamData<'vir> {}
+
 #[derive(Debug, Clone, Copy)]
-pub struct TyImpureImmRefData {}
+pub struct TyImpureImmRefData<'vir> {
+    pub pure: <PureTyDatas as TyDatas<'vir>>::ImmRefData,
+    /// Args: `(target, source, ...generics)`
+    ///
+    /// Halves `source.perm_field`, takes away that amount of access from `p_Param(source, ...)` and
+    /// gives the same amount to `p_Param(target, ...)`. Also ensures snapshot equality between
+    /// `target` and `source`.
+    pub bind_block: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
+    /// Args: `(target, source, ...generics)`
+    ///
+    /// Reverses `bind_block`. It requires the same wand ensured when binding,
+    /// and transfers permissions back to source. It also adds the permission field of `target` to `source`,
+    /// and removes all access to the target perm field.
+    pub unbind_unblock: vir::MethodIdn<'vir, (vir::Ref, vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
+    /// Creates a snapshot type set to the given Ref. It's used only during
+    /// the initial step of an ImmRef assignment.
+    /// Args: `blocked_place`, `shadow_place`
+    pub arbitrary_value: vir::FunctionIdn<'vir, (vir::Ref, vir::PSnap, vir::Perm), vir::CSnap>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TyImpureRawData {}
@@ -129,6 +151,7 @@ impl TaskEncoder for TyImpureEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,

@@ -116,6 +116,7 @@ impl TaskEncoder for SpecEnc {
                 },
             )
             .unwrap_or((None, &[], &[], &[]));
+            tracing::debug!(?extern_spec, ?pres, ?posts, ?pledges, "SpecEncTask");
             let pledges = vcx.alloc_slice(
                 &pledges
                     .iter()

@@ -118,6 +118,7 @@ impl TaskEncoder for TyUsePureEnc {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut task_encoder::TaskEncoderDependencies<'vir, Self>,
@@ -160,6 +161,7 @@ impl<'a, 'vir> TyUsePureWalker<'a, 'vir> {
         TyUsePureWalker { deps, args_t, args }
     }
 
+    #[tracing::instrument(skip(self), fields(self.args_t, self.args))]
     fn encode_ty(
         &mut self,
         ty: TyData<'vir, (RustTyDatas, PureTyDatas)>,
@@ -313,13 +315,14 @@ impl<'vir> TyData<'vir, UsePureTyDatas> {
 impl<'vir> TyUsePureImmRef<'vir> {
     pub fn prim_to_snap<Curr, Next>(
         &self,
-        ref_: vir::ExprGenRef<'vir, Curr, Next>,
+        shadow: vir::ExprGenRef<'vir, Curr, Next>,
+        blocked: vir::ExprGenRef<'vir, Curr, Next>,
         metadata: vir::ExprGenSnap<'vir, Curr, Next>,
         inner: vir::ExprGenSnap<'vir, Curr, Next>,
     ) -> vir::ExprGenCSnap<'vir, Curr, Next> {
         let metadata = self.metadata_caster.cast_to_callee_ctx(metadata);
         let inner = self.referent_caster.cast_to_callee_ctx(inner);
-        self.pure.prim_to_snap.call()(ref_, metadata.downcast_ty(), inner.downcast_ty())
+        self.pure.prim_to_snap.call()(shadow, blocked, metadata.downcast_ty(), inner.downcast_ty())
     }
 
     pub fn deref_access<Curr, Next>(

@@ -277,6 +277,13 @@ impl<'vir, 'v> ToViper<'vir, 'v> for vir::Const<'vir> {
             }
             vir::ConstData::Int(v) => ctx.ast.int_lit_from_ref_with_pos(v, pos),
             vir::ConstData::Wildcard => ctx.ast.wildcard_perm(),
+            vir::ConstData::FullPerm => ctx.ast.full_perm(),
+            vir::ConstData::NoPerm => ctx.ast.no_perm(),
+            vir::ConstData::Perm(a, b) => {
+                let a = ctx.ast.int_lit_with_pos(*a as _, pos); // TODO: Error-handle these two primitive casts
+                let b = ctx.ast.int_lit_with_pos(*b as _, pos);
+                ctx.ast.fractional_perm(a, b)
+            }
             vir::ConstData::Null => ctx.ast.null_lit_with_pos(pos),
         }
     }
@@ -959,6 +966,9 @@ impl<'vir, 'v> ToViper<'vir, 'v> for vir::Stmt<'vir> {
                 .unfold_with_pos(pred.to_viper_no_pos(ctx), ctx.span_to_pos(self.span)),
             vir::StmtKindGenData::Label(label) => ctx.ast.label(label, &[]),
             //vir::StmtGenData::Dummy(#[reify_copy] &'vir str),
+            vir::StmtKindGenData::Assert(v) => ctx
+                .ast
+                .assert(v.to_viper_no_pos(ctx), ctx.span_to_pos(self.span)),
             _ => unimplemented!(),
         }
     }

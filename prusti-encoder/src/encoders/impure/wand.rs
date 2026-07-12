@@ -28,6 +28,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .collect()
     }
 
+    #[tracing::instrument(skip(self))]
     pub(crate) fn pcs_handle_wand(
         &mut self,
         borrows_state: &BorrowsState<'_, 'vir>,

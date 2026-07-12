@@ -83,6 +83,9 @@ cfg_if! {
                 StmtKindGenData::Label(_) => {},
                 StmtKindGenData::Comment(_) => {},
                 StmtKindGenData::Dummy(_) => todo!(),
+                StmtKindGenData::Assert(e) => {
+                    check_expr_bindings(m, e.as_dyn());
+                },
             }
         }
         fn check_expr_bindings<'vir, Curr, Next>(
@@ -944,6 +947,13 @@ impl<'tcx> VirCtxt<'tcx> {
         &'vir self,
     ) -> TerminatorStmtGen<'vir, Curr, Next> {
         self.alloc(TerminatorStmtGenData::AssumeFalse)
+    }
+
+    pub fn mk_assert_stmt<'vir, Curr, Next>(
+        &'vir self,
+        expr: ExprGenBool<'vir, Curr, Next>,
+    ) -> StmtGen<'vir, Curr, Next> {
+        self.alloc(StmtGenData::new(self.alloc(StmtKindGenData::Assert(expr))))
     }
 
     pub fn mk_goto_stmt<'vir, Curr, Next>(

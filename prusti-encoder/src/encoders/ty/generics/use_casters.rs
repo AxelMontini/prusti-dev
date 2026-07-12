@@ -73,14 +73,42 @@ impl<'vir> GArgCaster<'vir, Pure> {
 }
 
 impl<'vir> GArgCaster<'vir, Impure> {
+    /// Casts to callee context with FULL permission.
     pub fn cast_to_callee_ctx(&self, e: vir::ExprRef<'vir>) -> Option<vir::Stmt<'vir>> {
-        self.get()
-            .map(|c| (c.cast.make_generic)(e, c.ty_args.get_ty(), c.ty_args.get_const()).alloc())
+        let full_perm = vir::with_vcx(|vcx| vcx.mk_full_perm());
+        self.get().map(|c| {
+            (c.cast.make_generic)(e, c.ty_args.get_ty(), c.ty_args.get_const(), full_perm).alloc()
+        })
     }
 
+    /// Casts to caller context with FULL permission.
     pub fn cast_to_caller_ctx(&self, e: vir::ExprRef<'vir>) -> Option<vir::Stmt<'vir>> {
-        self.get()
-            .map(|c| (c.cast.make_concrete)(e, c.ty_args.get_ty(), c.ty_args.get_const()).alloc())
+        let full_perm = vir::with_vcx(|vcx| vcx.mk_full_perm());
+        self.get().map(|c| {
+            (c.cast.make_concrete)(e, c.ty_args.get_ty(), c.ty_args.get_const(), full_perm).alloc()
+        })
+    }
+
+    /// Casts to callee context with permission `perm`.
+    pub fn partial_cast_to_callee_ctx(
+        &self,
+        e: vir::ExprRef<'vir>,
+        perm: vir::ExprPerm<'vir>,
+    ) -> Option<vir::Stmt<'vir>> {
+        self.get().map(|c| {
+            (c.cast.make_generic)(e, c.ty_args.get_ty(), c.ty_args.get_const(), perm).alloc()
+        })
+    }
+
+    /// Casts to caller context with permission `perm`.
+    pub fn partial_cast_to_caller_ctx(
+        &self,
+        e: vir::ExprRef<'vir>,
+        perm: vir::ExprPerm<'vir>,
+    ) -> Option<vir::Stmt<'vir>> {
+        self.get().map(|c| {
+            (c.cast.make_concrete)(e, c.ty_args.get_ty(), c.ty_args.get_const(), perm).alloc()
+        })
     }
 }
 
@@ -95,6 +123,7 @@ impl TaskEncoder for GArgsCastEnc<Pure> {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,
@@ -125,6 +154,7 @@ impl TaskEncoder for GArgsCastEnc<Impure> {
         *task
     }
 
+    #[tracing::instrument(skip(deps))]
     fn do_encode_full<'vir>(
         task_key: &Self::TaskKey<'vir>,
         deps: &mut TaskEncoderDependencies<'vir, Self>,
