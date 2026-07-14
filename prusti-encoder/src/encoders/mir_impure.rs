@@ -1038,7 +1038,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             BorrowPcgEdgeKind::BorrowFlow(..) => "borrow_flow",
             BorrowPcgEdgeKind::Coupled(..) => "coupled",
             BorrowPcgEdgeKind::Delegation(..) => "delegation",
-            BorrowPcgEdgeKind::RawPtrDeref(..) => "raw_deref",
+            BorrowPcgEdgeKind::RawPtrDeref(..) => "ptr_deref",
         };
         comment!(
             self,
