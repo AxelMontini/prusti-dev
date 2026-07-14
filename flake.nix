@@ -126,6 +126,7 @@
           ASM_JAR = "${ow2Asm}/asm.jar";
           RUST_SYSROOT = "${rustToolchain}";
           JAVA_HOME = "${jdk}/lib/openjdk";
+          OPENSSL_DIR = "${pkgs.openssl.dev}";
 
           # libjvm.so is not found otherwise
           preBuild = ''
@@ -242,30 +243,15 @@
         #     ow2Asm
         #   ];
         # };
-        devShells.default =
-          with pkgs;
-          mkShell {
-            buildInputs = [
-              pkg-config
-              rustToolchain
-              viperToolchain
-              ow2Asm
-              rust-analyzer
-            ];
-
-            nativeBuildInputs = [
-              autoPatchelfHook
-            ];
-
-            shellHook = ''
-              export RUST_SYSROOT="${rustToolchain}"
-              export JAVA_HOME="${jdk}/lib/openjdk"
-              export LD_LIBRARY_PATH="${jdk}/lib/openjdk/lib/server:${pkgs.icu77}/lib"
-              export VIPER_HOME="${viperToolchain}/backends"
-              export Z3_EXE="${viperToolchain}/z3/bin/z3"
-              export ASM_JAR="${ow2Asm}/asm.jar"
-            '';
-          };
+        devShells.default = craneLib.devShell {
+          RUST_SYSROOT = "${rustToolchain}";
+          JAVA_HOME = "${jdk}/lib/openjdk";
+          LD_LIBRARY_PATH = "${jdk}/lib/openjdk/lib/server:${pkgs.icu77}/lib";
+          VIPER_HOME = "${viperToolchain}/backends";
+          Z3_EXE = "${viperToolchain}/z3/bin/z3";
+          ASM_JAR = "${ow2Asm}/asm.jar";
+          OPENSSL_DIR = "${pkgs.openssl.dev}";
+        };
       }
     );
 }
