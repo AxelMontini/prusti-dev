@@ -282,7 +282,7 @@ pub(crate) fn ty_impure<'vir>(
     let old_perm_field_sum = builder
         .vcx
         .mk_bin_op_expr(
-            vir::BinOpKind::Add,
+            vir::BinOpKind::PermAdd,
             builder.vcx.mk_old_expr(source_perm_field),
             builder.vcx.mk_old_expr(target_perm_field),
         )
