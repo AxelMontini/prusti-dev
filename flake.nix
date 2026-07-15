@@ -100,7 +100,16 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
         src = craneLib.cleanCargoSource ./.;
         # Common arguments can be set here to avoid repeating them later
-        commonArgs = {
+        envVars = {
+          LD_LIBRARY_PATH = "${jdk}/lib/openjdk/lib/server";
+          VIPER_HOME = "${viperToolchain}/backends";
+          Z3_EXE = "${viperToolchain}/z3/bin/z3";
+          ASM_JAR = "${ow2Asm}/asm.jar";
+          RUST_SYSROOT = "${rustToolchain}";
+          JAVA_HOME = "${jdk}/lib/openjdk";
+          OPENSSL_DIR = "${pkgs.openssl.dev}";
+        };
+        commonArgs = envVars // {
           inherit src;
           strictDeps = true;
 
@@ -119,15 +128,6 @@
             pkgs.makeWrapper
             pkgs.pkg-config
           ];
-
-          LD_LIBRARY_PATH = "${jdk}/lib/openjdk/lib/server";
-          VIPER_HOME = "${viperToolchain}/backends";
-          Z3_EXE = "${viperToolchain}/z3/bin/z3";
-          ASM_JAR = "${ow2Asm}/asm.jar";
-          RUST_SYSROOT = "${rustToolchain}";
-          JAVA_HOME = "${jdk}/lib/openjdk";
-          OPENSSL_DIR = "${pkgs.openssl.dev}";
-
           # libjvm.so is not found otherwise
           preBuild = ''
             addAutoPatchelfSearchPath ${jdk}/lib/openjdk/lib/server
@@ -243,15 +243,7 @@
         #     ow2Asm
         #   ];
         # };
-        devShells.default = craneLib.devShell {
-          RUST_SYSROOT = "${rustToolchain}";
-          JAVA_HOME = "${jdk}/lib/openjdk";
-          LD_LIBRARY_PATH = "${jdk}/lib/openjdk/lib/server:${pkgs.icu77}/lib";
-          VIPER_HOME = "${viperToolchain}/backends";
-          Z3_EXE = "${viperToolchain}/z3/bin/z3";
-          ASM_JAR = "${ow2Asm}/asm.jar";
-          OPENSSL_DIR = "${pkgs.openssl.dev}";
-        };
+        devShells.default = craneLib.devShell envVars // { };
       }
     );
 }
