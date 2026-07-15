@@ -469,6 +469,10 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     let inner = p_rvalue_ty.expect_immref();
                     let place_ref = place_expr.expr.address;
                     let perm = inner.perm_field(place_ref, None);
+                    let perm = self
+                        .vcx()
+                        .mk_bin_op_expr(vir::BinOpKind::PermMul, perm, self.vcx().mk_perm::<1, 2>())
+                        .downcast_ty();
 
                     EncodedRvalue {
                         expr: inner
@@ -651,10 +655,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
 
+        let before_unbind_label = self.new_label("before_unbind");
+
         let concretize = concretize
-            .then(|| data.unfold_actual(ref_p_target, label_target, None))
+            .then(|| {
+                data.unfold_actual(
+                    ref_p_target,
+                    Some(vir::OldLabel::Label(before_unbind_label)),
+                    None,
+                )
+            })
             .flatten();
-        // TODO: Label?
         let stmts_iter = data
             .unbind_unblock(data.deref_access(ref_p_target, label_target), ref_p_source)
             .chain(concretize);
