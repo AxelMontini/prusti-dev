@@ -173,12 +173,9 @@ pub(crate) fn ty_impure<'vir>(
     let half_source_perm_field = builder
         .vcx
         .mk_bin_op_expr(
-            vir::BinOpKind::DivRational,
+            vir::BinOpKind::DivRationalRational,
             source_perm_field,
-            builder
-                .vcx
-                .mk_const_expr(vir::ConstData::Int(2))
-                .downcast_ty(),
+            builder.vcx.mk_perm::<2, 1>(),
         )
         .downcast_ty();
 
@@ -223,12 +220,9 @@ pub(crate) fn ty_impure<'vir>(
     let tmp_perm_value_half_source: vir::ExprPerm<'_> = builder
         .vcx
         .mk_bin_op_expr(
-            vir::BinOpKind::DivRational,
+            vir::BinOpKind::DivRationalRational,
             builder.vcx.mk_old_expr(source_perm_field),
-            builder
-                .vcx
-                .mk_const_expr(vir::ConstData::Int(2))
-                .downcast_ty(),
+            builder.vcx.mk_perm::<2, 1>(),
         )
         .downcast_ty();
     let post_wand = builder.vcx.mk_wand(
