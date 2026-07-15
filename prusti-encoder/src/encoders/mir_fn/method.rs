@@ -12,7 +12,10 @@ use crate::{
         WandEncTask,
         mir_fn::{CallTaskDescription, RustSignature, SpecBlocks},
         pure::spec::MirSpecEncMode,
-        ty::generics::{GArgCaster, GArgsCastEnc, GArgsTy, GArgsTyEnc, GParams, GenericParamsEnc},
+        ty::generics::{
+            AliasUtils, AliasUtilsEnc, GArgCaster, GArgsCastEnc, GArgsTy, GArgsTyEnc, GParams,
+            GenericParamsEnc,
+        },
     },
     trait_support::is_function_with_body,
 };
@@ -150,6 +153,7 @@ impl TaskEncoder for MethodEnc {
         vir::with_vcx(|vcx| {
             let span = vcx.tcx().def_span(def_id);
             let trusted = crate::encoders::is_function_trusted(def_id);
+            let alias = deps.require_dep::<AliasUtilsEnc>(())?;
 
             let arg_defs = deps.require_ref_spanned::<MirLocalDefEnc>(
                 MirLocalDefEncTask::Local {
@@ -214,15 +218,29 @@ impl TaskEncoder for MethodEnc {
             // postconditions, respectively. "Direct" here refers to owned
             // Viper resources that must be passed in/out given the signature,
             // without going through any dereferences.
+            let perm_field_pre = |alias: &AliasUtils<'vir>,
+                                  vcx: &'vir vir::VirCtxt<'_>,
+                                  self_ref: vir::ExprRef<'vir>| {
+                vcx.mk_conj(&[
+                    alias.acc_perm_field(self_ref, None),
+                    vcx.mk_eq_expr(alias.perm_field(self_ref), vcx.mk_full_perm()),
+                ])
+            };
             let mut args = Vec::with_capacity(arg_count + params.count());
             for arg_idx in (0..arg_count).map(mir::Local::from) {
                 let name_p = arg_defs[arg_idx].local.name;
                 args.push(vir::vir_local_decl! { vcx; [name_p] : Ref });
                 if arg_idx != mir::RETURN_PLACE {
                     pres.push(arg_defs[arg_idx].impure_pred);
+                    pres.push(perm_field_pre(&alias, vcx, arg_defs[arg_idx].local_ex));
                 }
             }
             posts.push(arg_defs[mir::RETURN_PLACE].impure_pred);
+            posts.push(perm_field_pre(
+                &alias,
+                vcx,
+                arg_defs[mir::RETURN_PLACE].local_ex,
+            ));
 
             // ..
             pres.extend(wands.indirect_pres(vcx, &arg_defs, deps));
