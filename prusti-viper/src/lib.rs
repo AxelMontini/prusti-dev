@@ -223,15 +223,7 @@ impl<'vir, 'v> ToViper<'vir, 'v> for vir::BinOp<'vir> {
             vir::BinOpKind::CmpLe => ctx.ast.le_cmp_with_pos(lhs, rhs, pos),
             vir::BinOpKind::And => ctx.ast.and_with_pos(lhs, rhs, pos),
             vir::BinOpKind::Or => ctx.ast.or_with_pos(lhs, rhs, pos),
-            vir::BinOpKind::Add => {
-                // Needed, or consistency checks fail.
-                // Perms cannot be used with `add_with_pos`.
-                if *self.lhs.ty_dyn().kind() == vir::TypeKind::Perm {
-                    ctx.ast.perm_add(lhs, rhs)
-                } else {
-                    ctx.ast.add_with_pos(lhs, rhs, pos)
-                }
-            }
+            vir::BinOpKind::Add => ctx.ast.add_with_pos(lhs, rhs, pos),
             vir::BinOpKind::Sub => ctx.ast.sub_with_pos(lhs, rhs, pos),
             vir::BinOpKind::Mul => ctx.ast.mul_with_pos(lhs, rhs, pos),
             vir::BinOpKind::Div => ctx.ast.div_with_pos(lhs, rhs, pos),
