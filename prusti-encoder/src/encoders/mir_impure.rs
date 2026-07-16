@@ -578,6 +578,10 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         let ref_p_source = self
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
+
+        self.stmt(self.vcx.mk_assert_stmt(
+            data.acc_perm_field(data.deref_access(ref_p_source, label_source), None),
+        ));
         // TODO: Label?
         let stmts_iter =
             data.unbind_unblock_refs(ref_p_target, ref_p_source, label.map(vir::OldLabel::Label));
@@ -617,15 +621,22 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .vcx
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
 
-        let before_unbind_label = self.new_label("before_unbind");
-
+        // Assert is required for packaging wands, as otherwise acc(self.perm_field) is not
+        // taken from the current state. In other parts of the code it's redundant.
+        // Must go BEFORE of the unbind label (if there's any)!
+        self.stmt(
+            self.vcx
+                .mk_assert_stmt(data.acc_perm_field(ref_p_source, None)),
+        );
         let concretize = concretize
             .then(|| {
-                data.unfold_actual(
-                    ref_p_target,
+                let before_unbind_label = self.new_label("before_unbind");
+                let perm = data.perm_field(
+                    ref_p_source,
                     Some(vir::OldLabel::Label(before_unbind_label)),
-                    None,
-                )
+                );
+
+                data.unfold_actual(ref_p_target, label_target, Some(perm))
             })
             .flatten();
         let stmts_iter = data

@@ -410,10 +410,12 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                     .collect()
             }
             TySpecifics::Raw(..) => Vec::new(),
-            TySpecifics::ImmRef(data) => data
-                .fold_shadow(self_ref, label, /*perm*/ None) // TODO: Axel: See same in unfold
-                .into_iter()
-                .collect(),
+            TySpecifics::ImmRef(data) => {
+                let perm = data.perm_field(data.deref_access(self_ref, label), None); // at current place, no label
+                data.fold_shadow(self_ref, label, Some(perm))
+                    .into_iter()
+                    .collect()
+            }
             TySpecifics::MutRef(data) => data.fold(self_ref, label).into_iter().collect(),
             TySpecifics::StructLike(data) => data.fold(self_ref, perm).collect(),
             TySpecifics::EnumLike(..) => {
@@ -466,9 +468,9 @@ impl<'vir> TyData<'vir, UseImpureTyDatas> {
                 .collect()
             }
             TySpecifics::Raw(..) => Vec::new(),
-            // TODO: Axel: actually ignore perm? Due to Deref x -> *x
+            // TODO: Axel: ignore `perm`, as we're unfolding the immref to obtain the referent
             TySpecifics::ImmRef(data) => data
-                .unfold_shadow(self_ref, old, /*perm*/ None)
+                .unfold_shadow(self_ref, old, None)
                 .into_iter()
                 .collect(),
             TySpecifics::MutRef(data) => data.unfold(self_ref, old).into_iter().collect(),
@@ -783,17 +785,14 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         source: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         vir::with_vcx(|vcx| {
-            [
-                vcx.mk_assert_stmt(self.acc_perm_field(source, None)),
-                vcx.alloc(vir::StmtGenData::new(vcx.alloc(
-                    self.impure.unbind_unblock.call()(
-                        target,
-                        source,
-                        self.args.get_ty(),
-                        self.args.get_const(),
-                    ),
-                ))),
-            ]
+            [vcx.alloc(vir::StmtGenData::new(vcx.alloc(
+                self.impure.unbind_unblock.call()(
+                    target,
+                    source,
+                    self.args.get_ty(),
+                    self.args.get_const(),
+                ),
+            )))]
         })
         .into_iter()
     }
