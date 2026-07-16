@@ -1066,10 +1066,44 @@ impl<'vir: 'enc, 'enc> Enc<'vir, 'enc> {
                         EncodedPlace::new(proj_app, place_ref)
                     }
                     TyKind::Ref(.., ty::Mutability::Not) => {
+                        // let e_ty = e_ty.expect_immref();
+                        // let snap = encoded_place.snap.downcast_ty();
+                        // let metadata = e_ty.metadata_access(snap);
+                        // let val_expr = e_ty.value_access(snap);
+                        // EncodedPlace::new(val_expr, encoded_place.place_ref).with_metadata(metadata)
                         let e_ty = e_ty.expect_immref();
                         let snap = encoded_place.snap.downcast_ty();
                         let metadata = e_ty.metadata_access(snap);
-                        let val_expr = e_ty.value_access(snap);
+                        let ref_expr = e_ty.deref_access(snap);
+                        let val_expr = if self.impure_context {
+                            // In a method's pre/post the snapshot is shallow
+                            // and doesn't contain the value behind the immutable
+                            // reference, so we need to take an extra snapshot
+                            // here.
+                            // TODO: avoid all of this by using shallow and deep snapshots
+                            let ty_task = RustTyDecomposition::from_ty(place_ty.ty, self.context);
+                            let inner = ty_task.ty.expect_immref();
+                            let normalized = inner
+                                .referent
+                                .decompose_compare_normalize(ty_task.ty.params, ty_task.args);
+                            let caster = self
+                                .deps
+                                .require_dep::<crate::GArgsCastEnc<crate::Pure>>(normalized)
+                                .unwrap();
+                            let inner_ty_task = inner
+                                .referent
+                                .decompose_context(ty_task.ty.params, ty_task.args);
+                            let inner_ty = self
+                                .deps
+                                .require_dep::<crate::encoders::TyUseImpureEnc>(inner_ty_task)
+                                .unwrap();
+                            caster.cast_to_caller_ctx(inner_ty.ref_to_snap(ref_expr))
+                        } else {
+                            // In a pure function, the snapshot passed in as an
+                            // argument should be "deep" such that we can
+                            // read the value directly from the snapshot itself
+                            e_ty.value_access(snap)
+                        };
                         EncodedPlace::new(val_expr, encoded_place.place_ref).with_metadata(metadata)
                     }
                     TyKind::Ref(.., ty::Mutability::Mut) => {
