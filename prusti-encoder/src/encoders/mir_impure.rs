@@ -1262,11 +1262,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
         let place_enc = self.encode_place(place);
         comment!(self, "exhale due to Weaken(E, W)");
+        let alias = self.deps.require_ref::<AliasUtilsEnc>(()).unwrap();
+        self.stmt(
+            self.vcx
+                .mk_exhale_stmt(alias.acc_perm_field(place_enc.expr.address, None)),
+        );
         self.stmt(self.vcx.mk_exhale_stmt(place_ty_out.ref_to_pred(
             self.vcx,
             place_enc.expr.expect_predicate(),
             None,
         )));
+        self.stmt(self.vcx.mk_refute_stmt(self.vcx.mk_bool::<false>())); // TODO: Axel: Remove later
     }
 
     fn loop_analysis(&mut self) -> &LoopAnalysis {
