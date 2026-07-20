@@ -1,14 +1,18 @@
+use std::{any::Any, fmt, marker::PhantomData};
+
 use pcg::borrow_pcg::region_projection::{
     ExtractRegionsCtxt as _, LifetimeProjection, PcgRegion, Region,
 };
-use task_encoder::{EncodeFullResult, TaskEncoder, TaskEncoderDependencies};
+use task_encoder::{EncodeFullError, EncodeFullResult, TaskEncoder, TaskEncoderDependencies};
 use vir::{CastType, Reify};
 
 use crate::encoders::{
     TyUseImpureEnc,
     ty::{
-        RustTyDecomposition,
+        RustFieldData, RustTyDecomposition,
         indirect::{IndirectPredicatesEnc, PrustiPcgCtxt},
+        use_impure::TyUseImpureImmRef,
+        use_pure::TyUsePureField,
     },
 };
 
@@ -545,4 +549,139 @@ impl TaskEncoder for IndirectPredicatesWandRhsEnc {
             ))
         })
     }
+}
+
+/// Used for flexible indirect encoding of types.
+/// All this does is "walking" the given type in DFS-fashion (e.g. over struct fields).
+/// TODO: Maybe BFS better
+/// The given visitor is applied to each member in order to encode it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndirectWalker<'vir, V: IndirectWalkerVisitor<'vir> + PartialEq + Eq + Clone> {
+    visitor: V,
+    _m: PhantomData<&'vir V>,
+}
+
+impl<'vir, V: IndirectWalkerVisitor<'vir> + PartialEq + Eq + Clone> IndirectWalker<'vir, V> {
+    /// Recursively visits `input` and its eventual fields.
+    /// Every time a new lifetimeprojection is encountered, the according `visit_type` is called.
+    /// Returning `Ok(None)` stops the walker from going deeper.
+    pub fn walk<E: TaskEncoder>(
+        &self,
+        input: Lp<'vir>,
+        vcx: &vir::VirCtxt<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, E>,
+    ) -> Result<Option<Vec<V::Out>>, EncodeFullError<'vir, E>> {
+        let ty = input.base();
+        let task_region = projection_region(&input);
+        let self_ty_enc = deps.require_dep::<TyUsePureEnc>(ty)?;
+        let combined = ty.ty.zip(self_ty_enc);
+        let mut preds = vec![];
+        // Collects (accessor, indirect_predicate) pairs for the fields of a
+        // struct-like (used for structs and enum variants).
+        let collect_field_predicates =
+            |struct_data: StructData<'vir, (RustTyDatas, UsePureTyDatas)>,
+             deps: &mut TaskEncoderDependencies<'vir, E>| {
+                let mut result = vec![];
+                for (field_ty, accessor) in struct_data.fields {
+                    let field_ty = field_ty.decompose_context(ty.ty.params, ty.args);
+                    if let Some(new_projection) =
+                        LifetimeProjection::new(field_ty, task_region, None, PrustiPcgCtxt)
+                    {
+                        let Some(field_preds) =
+                            self.visitor
+                                .visit_field(new_projection, accessor, vcx, deps)?
+                        else {
+                            return Ok(None);
+                        };
+                        result.extend(field_preds);
+
+                        result.extend(self.walk(new_projection, vcx, deps)?.into_iter().flatten());
+                    }
+                }
+                Ok(Some(result))
+            };
+
+        match combined.specifics {
+            // Optimisation: if there are no type arguments, there cannot be
+            // anything behind a ref inside (except for 'static, which we
+            // ignore for now). Plus it skips unsupported types if they
+            // don't have lifetimes.
+            _ if ty.args.args().is_empty() => (),
+            // TODO: it's not valid to have nothing for these. We should fix
+            // this by using an opaque predicate to represent potential
+            // indirect stuff. For example:
+            // fn foo<'a, T: Trait<'a>>(x: T) -> &'a mut i32 { x.get() }
+            // Here, `T` could be instantiated as `&'a mut i32` in which
+            // case we would want a wand with `i32(result) --* opaque_behind_a(x)`.
+            // This is why we should return `opaque_behind_a(x)` here.
+            TySpecifics::Param(_) | TySpecifics::Opaque(_) | TySpecifics::ArrayLike(_) => (),
+            TySpecifics::ImmRef((data, ref_domain)) => {
+                // TODO: De-duplicate immref and mutref code? Almost the same except perms
+                // TODO: USE PROPER PERMISSIONS!!! Not write
+                assert_eq!(ty.args.args().len(), 2);
+                let immref_impure = deps.require_dep::<TyUseImpureEnc>(ty)?.expect_immref();
+                let inner_ty = data.referent.decompose_context(ty.ty.params, ty.args);
+                let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
+                // TODO: Axel: how can this fail?
+                let lp =
+                    LifetimeProjection::new(inner_ty, ref_region, None, PrustiPcgCtxt).unwrap();
+                match self
+                    .visitor
+                    .visit_immref(input, lp, *immref_impure, vcx, deps)?
+                {
+                    Some(p) => preds.extend(p),
+                    None => return Ok(None),
+                }
+
+                // Keep walking deeper
+                match self.walk(lp, vcx, deps)? {
+                    Some(p) => preds.extend(p),
+                    None => return Ok(None),
+                }
+            }
+            TySpecifics::StructLike(data) => {
+                // TODO: invalid recursion here if the defined struct is
+                // recursive!
+                preds.extend(collect_field_predicates(data, deps)?.into_iter().flatten())
+            }
+            TySpecifics::EnumLike(data) => {
+                let snap_to_discr_snap = data.data.1.snap_to_discr_snap;
+
+                let variant_preds = data
+                    .variants
+                    .into_iter()
+                    .map(|variant| collect_field_predicates(variant.inner, deps))
+                    .collect::<Result<Vec<Option<_>>, _>>()?;
+
+                preds.extend(variant_preds.into_iter().flatten().flatten());
+            }
+            _ => (),
+        };
+        Ok(Some(preds))
+    }
+}
+
+type Lp<'vir> = LifetimeProjection<'vir, RustTyDecomposition<'vir>>;
+
+pub trait IndirectWalkerVisitor<'vir> {
+    type Out = Option<vir::ExprBool<'vir>>;
+    type Error = ();
+
+    fn visit_immref<E: TaskEncoder>(
+        &self,
+        immref: Lp<'vir>,
+        inner: Lp<'vir>,
+        data_immref: TyUseImpureImmRef<'vir>,
+        vcx: &vir::VirCtxt<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, E>,
+    ) -> Result<Option<Vec<Self::Out>>, EncodeFullError<'vir, E>>;
+
+    fn visit_field<E: TaskEncoder>(
+        &self,
+        field: Lp<'vir>,
+        // data: &RustFieldData<'vir>,
+        accessor: &TyUsePureField<'vir>,
+        vcx: &vir::VirCtxt<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, E>,
+    ) -> Result<Option<Vec<Self::Out>>, EncodeFullError<'vir, E>>;
 }

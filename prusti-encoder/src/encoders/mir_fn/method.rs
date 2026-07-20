@@ -229,15 +229,15 @@ impl TaskEncoder for MethodEnc {
                 args.push(vir::vir_local_decl! { vcx; [name_p] : Ref });
                 if arg_idx != mir::RETURN_PLACE {
                     pres.push(arg_defs[arg_idx].impure_pred);
-                    pres.push(perm_field_pre(&alias, vcx, arg_defs[arg_idx].local_ex));
+                    // pres.push(perm_field_pre(&alias, vcx, arg_defs[arg_idx].local_ex));
                 }
             }
             posts.push(arg_defs[mir::RETURN_PLACE].impure_pred);
-            posts.push(perm_field_pre(
-                &alias,
-                vcx,
-                arg_defs[mir::RETURN_PLACE].local_ex,
-            ));
+            // posts.push(perm_field_pre(
+            //     &alias,
+            //     vcx,
+            //     arg_defs[mir::RETURN_PLACE].local_ex,
+            // ));
 
             // ..
             pres.extend(wands.indirect_pres(vcx, &arg_defs, deps));

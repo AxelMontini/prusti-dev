@@ -1,0 +1,366 @@
+use itertools::Itertools;
+use pcg::borrow_pcg::region_projection::{
+    ExtractRegionsCtxt, LifetimeProjection, LifetimeProjectionIdx, PcgRegion, Region,
+};
+use prusti_rustc_interface::{
+    index::IndexVec,
+    middle::ty::{self, TyCtxt},
+};
+use task_encoder::{EncodeFullResult, TaskEncoder, TaskEncoderDependencies};
+use vir::{CastType, Reify};
+
+use crate::encoders::{
+    TyUseImpureEnc,
+    ty::{RustTyDecomposition, generics::AliasUtilsEnc},
+};
+
+use super::{
+    data::{StructData, TySpecifics},
+    rust_ty::RustTyDatas,
+    use_pure::{TyUsePureEnc, UsePureTyDatas},
+};
+
+#[derive(Copy, Clone)]
+pub struct PrustiPcgCtxt;
+
+impl<'tcx> ExtractRegionsCtxt<'tcx, RustTyDecomposition<'tcx>, PcgRegion<'tcx>> for PrustiPcgCtxt {
+    fn extract_regions(
+        self,
+        data: RustTyDecomposition<'tcx>,
+    ) -> IndexVec<LifetimeProjectionIdx<Region>, PcgRegion<'tcx>> {
+        data.args
+            .args()
+            .iter()
+            .flat_map(|arg| arg.walk())
+            .filter_map(|arg| arg.as_region().map(PcgRegion::from))
+            .unique()
+            .collect()
+    }
+}
+
+pub struct IndirectPermFieldEnc;
+
+type ExprInput<'vir> = (vir::ExprRef<'vir>, Option<vir::OldLabel<'vir>>);
+type ExprOutput<'vir> = vir::ExprGenBool<'vir, ExprInput<'vir>, vir::ExprKind<'vir>>;
+
+#[derive(Clone)]
+pub struct IndirectPermFieldEncOutputRef<'vir> {
+    pub predicate_applications: Vec<ExprOutput<'vir>>,
+}
+
+impl<'vir> IndirectPermFieldEncOutputRef<'vir> {
+    pub fn new(predicate_applications: Vec<ExprOutput<'vir>>) -> Self {
+        Self {
+            predicate_applications,
+        }
+    }
+}
+
+impl<'vir> task_encoder::OutputRefAny for IndirectPermFieldEncOutputRef<'vir> {}
+
+fn projection_region<'tcx>(
+    proj: &LifetimeProjection<'tcx, RustTyDecomposition<'tcx>, Region>,
+) -> PcgRegion<'tcx> {
+    let regions = PrustiPcgCtxt.extract_regions(proj.base());
+    regions[proj.region_idx()]
+}
+
+impl TaskEncoder for IndirectPermFieldEnc {
+    task_encoder::encoder_cache!(IndirectPermFieldEnc);
+    const ENCODER_NAME: &'static str = "indirect predicates encoder";
+
+    type TaskDescription<'vir> = LifetimeProjection<'vir, RustTyDecomposition<'vir>, Region>;
+
+    type TaskKey<'tcx> = Self::TaskDescription<'tcx>;
+
+    type EncodingError = ();
+
+    type OutputFullDependency<'vir> = IndirectPermFieldEncOutputRef<'vir>;
+
+    fn task_to_key<'vir>(task: &Self::TaskDescription<'vir>) -> Self::TaskKey<'vir> {
+        *task
+    }
+
+    #[tracing::instrument(skip(deps))]
+    fn do_encode_full<'vir>(
+        task_key: &Self::TaskKey<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, Self>,
+    ) -> EncodeFullResult<'vir, Self> {
+        deps.emit_output_ref(*task_key, ())?;
+        vir::with_vcx(|vcx| {
+            let task_region = projection_region(task_key);
+            let ty = task_key.base();
+            let self_ty_enc = deps.require_dep::<TyUsePureEnc>(ty)?;
+            let combined = ty.ty.zip(self_ty_enc);
+            let mut predicate_applications = vec![];
+            // Collects (accessor, indirect_predicate) pairs for the fields of a
+            // struct-like (used for structs and enum variants).
+            let collect_field_predicates =
+                |struct_data: StructData<'vir, (RustTyDatas, UsePureTyDatas)>,
+                 deps: &mut TaskEncoderDependencies<'vir, IndirectPermFieldEnc>| {
+                    let mut result = vec![];
+                    for (field_ty, accessor) in struct_data.fields {
+                        let field_ty = field_ty.decompose_context(ty.ty.params, ty.args);
+                        if let Some(new_projection) =
+                            LifetimeProjection::new(field_ty, task_region, None, PrustiPcgCtxt)
+                        {
+                            let field_indirect =
+                                deps.require_dep::<IndirectPermFieldEnc>(new_projection)?;
+                            for inner_expr in field_indirect.predicate_applications {
+                                result.push((accessor, inner_expr));
+                            }
+                        }
+                    }
+                    Ok(result)
+                };
+
+            let alias = deps.require_ref::<AliasUtilsEnc>(()).unwrap();
+
+            predicate_applications.push(vcx.mk_lazy_expr(
+                "self_perm_field",
+                vir::TYPE_BOOL,
+                Box::new(move |_vcx, (self_ref, label)| {
+                    alias
+                        .acc_perm_field(vcx.maybe_apply_label(self_ref, label), None)
+                        .kind
+                }),
+            ));
+
+            match combined.specifics {
+                // Optimisation: if there are no type arguments, there cannot be
+                // anything behind a ref inside (except for 'static, which we
+                // ignore for now). Plus it skips unsupported types if they
+                // don't have lifetimes.
+                _ if ty.args.args().is_empty() => (),
+                TySpecifics::Primitive(_) | TySpecifics::Raw(_) | TySpecifics::Builtin(_) => (),
+                // TODO: it's not valid to have nothing for these. We should fix
+                // this by using an opaque predicate to represent potential
+                // indirect stuff. For example:
+                // fn foo<'a, T: Trait<'a>>(x: T) -> &'a mut i32 { x.get() }
+                // Here, `T` could be instantiated as `&'a mut i32` in which
+                // case we would want a wand with `i32(result) --* opaque_behind_a(x)`.
+                // This is why we should return `opaque_behind_a(x)` here.
+                TySpecifics::Param(_) | TySpecifics::Opaque(_) | TySpecifics::ArrayLike(_) => (),
+                TySpecifics::ImmRef((data, ref_domain)) => {
+                    // TODO: De-duplicate immref and mutref code? Almost the same except perms
+                    assert_eq!(ty.args.args().len(), 2);
+                    let immref_impure = deps.require_dep::<TyUseImpureEnc>(ty)?.expect_immref();
+                    let inner_ty = data.referent.decompose_context(ty.ty.params, ty.args);
+                    // let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
+                    let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
+                    if ref_region == task_region {
+                        predicate_applications.push(vcx.mk_lazy_expr(
+                            "ref_perm_field_bounds_indirect",
+                            vir::TYPE_BOOL,
+                            Box::new(move |vcx, (self_expr, label)| {
+                                let addr = immref_impure.deref_access(self_expr, label);
+                                let acc_field = immref_impure.acc_perm_field(addr, None);
+                                let field_bound_nonzero = vcx
+                                    .mk_bin_op_expr(
+                                        vir::BinOpKind::CmpLt,
+                                        vcx.mk_no_perm(),
+                                        immref_impure.perm_field(addr, None),
+                                    )
+                                    .downcast_ty();
+                                let field_bound_le_half = vcx
+                                    .mk_bin_op_expr(
+                                        vir::BinOpKind::CmpLe,
+                                        immref_impure.perm_field(addr, None),
+                                        vcx.mk_perm::<1, 2>(),
+                                    )
+                                    .downcast_ty();
+                                let expr = vcx.mk_conj(&[
+                                    acc_field,
+                                    field_bound_nonzero,
+                                    field_bound_le_half,
+                                ]);
+                                expr.kind
+                            }),
+                        ));
+                        //     predicate_applications.push(vcx.mk_lazy_expr(
+                        //         "ref_indirect",
+                        //         vir::TYPE_BOOL,
+                        //         Box::new(move |vcx, self_expr: vir::ExprRef<'vir>| {
+                        //             let addr = immre.deref_access(self_expr.downcast_ty());
+                        //             let perm = immref_impure.perm_field(addr, None);
+                        //             let expr = inner_impure.ref_to_pred(vcx, addr, Some(perm)).kind;
+                        //             tracing::debug!(?expr, "Instantiated ref_indirect lazy expr");
+                        //             expr
+                        //         }),
+                        //     ));
+                    }
+                    // if let Some(new_projection) =
+                    //     LifetimeProjection::new(inner_ty, task_region, None, PrustiPcgCtxt)
+                    // {
+                    //     let inner_indirect =
+                    //         deps.require_dep::<IndirectPermFieldEnc>(new_projection)?;
+                    //     predicate_applications.extend(
+                    //         inner_indirect
+                    //             .predicate_applications
+                    //             .into_iter()
+                    //             .map(|inner_expr| {
+                    //                 vcx.mk_lazy_expr(
+                    //                     "ref_inner_indirect",
+                    //                     vir::TYPE_BOOL,
+                    //                     Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
+                    //                         let expr = inner_expr
+                    //                             .reify(
+                    //                                 vcx,
+                    //                                 inner_impure.ref_to_snap(
+                    //                                     ref_domain
+                    //                                         .deref_access(self_expr.downcast_ty()),
+                    //                                 ),
+                    //                             )
+                    //                             .kind;
+                    //                         tracing::debug!(
+                    //                             ?expr,
+                    //                             "Instantiated ref_inner_indirect lazy expr"
+                    //                         );
+                    //                         expr
+                    //                     }),
+                    //                 )
+                    //             }),
+                    //     );
+                    // }
+                }
+                TySpecifics::MutRef((data, ref_domain)) => {
+                    let inner_ty = data.referent.decompose_context(ty.ty.params, ty.args);
+                    // let inner_impure = deps.require_dep::<TyUseImpureEnc>(inner_ty)?;
+                    // let ref_region = PcgRegion::from(ty.args.args()[0].expect_region());
+                    // if ref_region == task_region {
+                    //     predicate_applications.push(vcx.mk_lazy_expr(
+                    //         "ref_indirect",
+                    //         vir::TYPE_BOOL,
+                    //         Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
+                    //             let addr = ref_domain.deref_access(self_expr.downcast_ty());
+                    //             let expr = inner_impure.ref_to_pred(vcx, addr, None).kind;
+                    //             tracing::debug!(?expr, "Instantiated ref_indirect lazy expr");
+                    //             expr
+                    //         }),
+                    //     ));
+                    //     predicate_applications.push(vcx.mk_lazy_expr(
+                    //         "ref_perm_field_indirect",
+                    //         vir::TYPE_BOOL,
+                    //         Box::new(move |vcx, self_expr: vir::ExprSnap<'vir>| {
+                    //             let addr = ref_domain.deref_access(self_expr.downcast_ty());
+                    //             mk_perm_field_acc(addr).kind
+                    //         }),
+                    //     ));
+                    // }
+                    // if let Some(new_projection) =
+                    //     LifetimeProjection::new(inner_ty, task_region, None, PrustiPcgCtxt)
+                    // {
+                    //     let inner_indirect =
+                    //         deps.require_dep::<IndirectPermFieldEnc>(new_projection)?;
+                    //     predicate_applications.extend(
+                    //         inner_indirect
+                    //             .predicate_applications
+                    //             .into_iter()
+                    //             .map(|inner_expr| {
+                    //                 vcx.mk_lazy_expr(
+                    //                     "ref_inner_indirect",
+                    //                     vir::TYPE_BOOL,
+                    //                     Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
+                    //                         let expr = inner_expr
+                    //                             .reify(
+                    //                                 vcx,
+                    //                                 inner_impure.ref_to_snap(
+                    //                                     ref_domain
+                    //                                         .deref_access(self_expr.downcast_ty()),
+                    //                                 ),
+                    //                             )
+                    //                             .kind;
+                    //                         tracing::debug!(
+                    //                             ?expr,
+                    //                             "Instantiated ref_inner_indirect lazy expr"
+                    //                         );
+                    //                         expr
+                    //                     }),
+                    //                 )
+                    //             }),
+                    //     );
+                    // }
+                }
+                TySpecifics::StructLike(data) => {
+                    // TODO: invalid recursion here if the defined struct is
+                    // recursive!
+                    for (accessor, inner_expr) in collect_field_predicates(data, deps)? {
+                        predicate_applications.push(vcx.mk_lazy_expr(
+                            "struct_field_perm_field",
+                            vir::TYPE_BOOL,
+                            Box::new(move |vcx, (self_expr, label)| {
+                                inner_expr
+                                    .reify(vcx, (accessor.field_ref(self_expr), label))
+                                    .kind
+                            }),
+                        ));
+                    }
+                }
+                TySpecifics::EnumLike(data) => {
+                    let snap_to_discr_snap = data.data.1.snap_to_discr_snap;
+                    //
+                    //     let variant_preds = data
+                    //         .variants
+                    //         .into_iter()
+                    //         .map(|variant| {
+                    //             let fields = collect_field_predicates(variant.inner, deps)?;
+                    //             Ok((variant.data.1.discr, fields))
+                    //         })
+                    //         .collect::<Result<Vec<_>, _>>()?;
+                    //
+                    //     if variant_preds.is_empty() {
+                    //         return Ok(((), IndirectPermFieldEncOutputRef::new(vec![])));
+                    //     }
+                    //
+                    //     predicate_applications.push(vcx.mk_lazy_expr(
+                    //         "enum_variant_indirect",
+                    //         vir::TYPE_BOOL,
+                    //         Box::new(move |vcx, self_expr: vir::ExprGenSnap<_, _>| {
+                    //             let self_csnap = self_expr.downcast_ty();
+                    //             let self_discr = snap_to_discr_snap.call()(self_csnap);
+                    //             let variant_conjs: Vec<_> = variant_preds
+                    //                 .iter()
+                    //                 .map(|(discr, fields)| {
+                    //                     let preds: Vec<_> = fields
+                    //                         .iter()
+                    //                         .map(|(acc, expr)| expr.reify(vcx, acc.read(self_csnap)))
+                    //                         .collect();
+                    //                     (discr, vcx.mk_conj(&preds))
+                    //                 })
+                    //                 .collect();
+                    //             let (first, rest) = variant_conjs.split_first().unwrap();
+                    //             rest.iter()
+                    //                 .fold(first.1, |else_, (discr, conj)| {
+                    //                     vcx.mk_ternary_expr(
+                    //                         vir::expr! { ([self_discr]) == ([*discr]) },
+                    //                         *conj,
+                    //                         else_,
+                    //                     )
+                    //                 })
+                    //                 .kind
+                    //         }),
+                    //     ));
+                }
+            };
+            Ok((
+                (),
+                IndirectPermFieldEncOutputRef::new(predicate_applications),
+            ))
+        })
+    }
+}
+
+pub fn projection_for_generalized_idx<'tcx>(
+    ty: ty::Ty<'tcx>,
+    idx: LifetimeProjectionIdx<pcg::borrow_pcg::region_projection::Generalized>,
+    decomp: RustTyDecomposition<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<LifetimeProjection<'tcx, RustTyDecomposition<'tcx>, Region>> {
+    use pcg::borrow_pcg::GeneralizedLifetime;
+    let lifetimes: IndexVec<_, GeneralizedLifetime<'tcx>> = tcx.extract_regions(ty);
+    let region = match lifetimes.get(idx)? {
+        GeneralizedLifetime::Region(r) => *r,
+        GeneralizedLifetime::RegionsIn(_) => return None,
+    };
+    LifetimeProjection::new(decomp, region, None, PrustiPcgCtxt)
+}

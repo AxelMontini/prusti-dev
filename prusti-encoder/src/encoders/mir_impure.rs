@@ -1028,7 +1028,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             return Ok(());
                         }
 
-                        let (_, dest_snap, _, _) =
+                        let (dest_enc, dest_snap, _, _) =
                             self.encode_place_with_snap((*destination).into());
                         let wand_args =
                             std::iter::once(Ok(dest_snap))
@@ -1036,12 +1036,25 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                                     self.encode_operand_snap_immediate(&operand.node)
                                 }))
                                 .collect::<Result<Vec<_>, EncodeFullError<'vir, E>>>()?;
+                        let wand_args_refs = std::iter::once(Ok(dest_enc.expr.address))
+                            .chain(
+                                args.iter()
+                                    .map(|operand| self.encode_operand(&operand.node)),
+                            )
+                            .collect::<Result<Vec<_>, EncodeFullError<'vir, E>>>()?;
                         let (label_pre, label_post) = self.call_labels[&call.location().block];
                         let call_ctx = WandCallContext {
                             caller_substs,
                             caller_g_params: GParams::from(self.def_id),
                         };
-                        wands.apply_wands(&wand_args, label_pre, label_post, call_ctx, self);
+                        wands.apply_wands(
+                            &wand_args,
+                            &wand_args_refs,
+                            label_pre,
+                            label_post,
+                            call_ctx,
+                            self,
+                        );
                     }
                     _ => unreachable!(),
                 }

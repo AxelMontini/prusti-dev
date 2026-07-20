@@ -33,17 +33,36 @@ pub struct PledgeExpr<'vir> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct PledgeArgs<'vir>(&'vir FxHashMap<mir::Local, vir::ExprSnap<'vir>>, mir::Local);
+pub struct PledgeArgs<'vir>(
+    &'vir FxHashMap<mir::Local, vir::ExprSnap<'vir>>,
+    &'vir FxHashMap<mir::Local, vir::ExprRef<'vir>>,
+    mir::Local,
+);
 
+impl<'vir> PledgeArgs<'vir> {
+    pub fn get_ref(&self, index: mir::Local) -> &vir::ExprRef<'vir> {
+        if index == mir::RETURN_PLACE {
+            &self.1[&self.2]
+        } else {
+            &self.1[&index]
+        }
+    }
+
+    pub fn get_snap(&self, index: mir::Local) -> &vir::ExprSnap<'vir> {
+        if index == mir::RETURN_PLACE {
+            &self.0[&self.2]
+        } else {
+            &self.0[&index]
+        }
+    }
+}
+
+// TODO: Axel: maybe index both snap and ref?
 impl<'vir> std::ops::Index<mir::Local> for PledgeArgs<'vir> {
     type Output = vir::ExprSnap<'vir>;
 
     fn index(&self, index: mir::Local) -> &Self::Output {
-        if index == mir::RETURN_PLACE {
-            &self.0[&self.1]
-        } else {
-            &self.0[&index]
-        }
+        self.get_snap(index)
     }
 }
 
@@ -55,18 +74,35 @@ impl<'vir> PledgeExpr<'vir> {
         Self { did, expr }
     }
 
-    pub fn pledge_args<T: Borrow<vir::ExprSnap<'vir>>>(
-        result: vir::ExprSnap<'vir>,
-        args: impl IntoIterator<Item = T>,
+    pub fn pledge_args<T: Borrow<vir::ExprSnap<'vir>>, R: Borrow<vir::ExprRef<'vir>>>(
+        result: (vir::ExprSnap<'vir>, vir::ExprRef<'vir>),
+        args: impl IntoIterator<Item = (T, R)>,
     ) -> PledgeArgs<'vir> {
-        let mut all_args: FxHashMap<mir::Local, _> = args
+        let (mut all_args_snap, mut all_args_ref): (
+            FxHashMap<mir::Local, _>,
+            FxHashMap<mir::Local, _>,
+        ) = args
             .into_iter()
             .enumerate()
-            .map(|(idx, a)| ((idx + 1).into(), *a.borrow()))
-            .collect();
-        let result_local = (all_args.len() + 1).into();
-        all_args.insert(result_local, result);
-        vir::with_vcx(|vcx| PledgeArgs(vcx.alloc(all_args), result_local))
+            .map(|(idx, (a, b))| ((idx + 1).into(), (*a.borrow(), *b.borrow())))
+            .fold(
+                Default::default(),
+                |(mut map_snap, mut map_ref), (idx, (esnap, eref))| {
+                    map_snap.insert(idx, esnap);
+                    map_ref.insert(idx, eref);
+                    (map_snap, map_ref)
+                },
+            );
+        let result_local = (all_args_snap.len() + 1).into();
+        all_args_snap.insert(result_local, result.0);
+        all_args_ref.insert(result_local, result.1);
+        vir::with_vcx(|vcx| {
+            PledgeArgs(
+                vcx.alloc(all_args_snap),
+                vcx.alloc(all_args_ref),
+                result_local,
+            )
+        })
     }
 
     pub fn expr(&self, args: PledgeArgs<'vir>) -> vir::ExprBool<'vir> {

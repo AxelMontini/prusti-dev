@@ -5,6 +5,7 @@ use crate::encoders::{
         RustTyDecomposition,
         generics::GParams,
         indirect::{IndirectPredicatesEnc, projection_for_generalized_idx},
+        indirect_perm::IndirectPermFieldEnc,
         indirect_wand::{IndirectPredicatesWandLhsEnc, IndirectPredicatesWandRhsEnc},
     },
 };
@@ -44,11 +45,14 @@ impl<'vir, E: TaskEncoder> ImpureEncVisitor<'vir, '_, E> {
         let mut wand_packages = Vec::new();
         let label = self.new_label("package_post");
         let result = self.local_defs.locals[mir::RETURN_PLACE].impure_snap;
-        let result = self.vcx.mk_local_labelled_old_expr(result, label);
+        let result = (
+            self.vcx.mk_local_labelled_old_expr(result, label),
+            self.local_defs.locals[mir::RETURN_PLACE].local_ex,
+        ); // TODO: Axel: Label?
         let args = self
             .local_defs
             .args()
-            .map(|a| self.vcx.mk_old_expr(a.impure_snap));
+            .map(|a| (self.vcx.mk_old_expr(a.impure_snap), a.local_ex));
         let args = PledgeExpr::pledge_args(result, args);
         let mut decl_generator = (0..).map(|i| {
             self.vcx.mk_local_decl(
@@ -218,7 +222,7 @@ impl<'vir> WandEncOutput<'vir> {
         deps: &mut TaskEncoderDependencies<'vir, impl TaskEncoder>,
         g: impl Into<FunctionShapeNode<Generalized>> + core::fmt::Debug,
         call_ctx: Option<WandCallContext<'vir>>,
-        mut snap: impl FnMut(mir::Local) -> vir::ExprSnap<'vir>,
+        mut snap: impl FnMut(mir::Local) -> (vir::ExprSnap<'vir>, vir::ExprRef<'vir>),
         is_lhs: bool,
     ) -> Option<
         impl FnOnce(Option<vir::LocalDeclPerm<'vir>>) -> (vir::ExprBool<'vir>, vir::ExprPerm<'vir>),
@@ -242,6 +246,11 @@ impl<'vir> WandEncOutput<'vir> {
                 .predicate_applications
         };
 
+        let perm_field_preds = deps
+            .require_dep::<IndirectPermFieldEnc>(region_proj)
+            .unwrap()
+            .predicate_applications;
+
         if predicates.is_empty() {
             // There are no resources associated with this node, skip.
             return None;
@@ -256,11 +265,17 @@ impl<'vir> WandEncOutput<'vir> {
         );
 
         let local = g.mir_local();
-        let local_snap = snap(local);
+        let (local_snap, local_ex) = snap(local);
         let out = move |perm: Option<LocalDeclPerm<'vir>>| {
-            let perm_expr = perm
-                .map(|decl| vcx.mk_local_ex(decl))
-                .unwrap_or_else(|| vcx.mk_full_perm());
+            let perm_expr =
+                perm.map(|decl| vcx.mk_local_ex(decl))
+                    .unwrap_or_else(|| match data.specifics {
+                        crate::encoders::ty::TySpecifics::ImmRef(data) => data.perm_field(
+                            data.deref_access_snap(local_snap.downcast_ty(), None),
+                            Some(vir::OldLabel::None),
+                        ),
+                        _ => vcx.mk_no_perm(),
+                    });
             let perm_value = match data.specifics {
                 crate::encoders::ty::TySpecifics::ImmRef(data) => {
                     data.perm_field(data.deref_access_snap(local_snap.downcast_ty(), None), None)
@@ -269,9 +284,14 @@ impl<'vir> WandEncOutput<'vir> {
             };
             (
                 vcx.mk_conj(
-                    &predicates
+                    &perm_field_preds
                         .iter()
-                        .map(|p| p.reify(vcx, (local_snap, perm_expr)))
+                        .map(|p| p.reify(vcx, (local_ex, (!is_lhs).then_some(vir::OldLabel::None))))
+                        .chain(
+                            predicates
+                                .iter()
+                                .map(|p| p.reify(vcx, (local_snap, perm_expr))),
+                        )
                         .collect::<Vec<_>>(),
                 ),
                 perm_value,
@@ -317,17 +337,73 @@ impl<'vir> WandEncOutput<'vir> {
         )
     }
 
+    fn encode_perm_fields_for_function_shape_node(
+        &self,
+        vcx: &'vir vir::VirCtxt<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, impl TaskEncoder>,
+        g: impl Into<FunctionShapeNode<Generalized>>,
+        call_ctx: Option<WandCallContext<'vir>>,
+        mut local_ref: impl FnMut(mir::Local) -> (vir::ExprRef<'vir>, Option<vir::OldLabel<'vir>>),
+    ) -> Option<vir::ExprBool<'vir>> {
+        use vir::Reify;
+        let g = g.into();
+        let arg_ty = g.ty(self.fn_sig(vcx, call_ctx));
+        let decomp = RustTyDecomposition::from_ty(arg_ty, self.g_params(vcx, call_ctx));
+        let region_proj =
+            projection_for_generalized_idx(arg_ty, g.region_idx(), decomp, vcx.tcx())?;
+        let predicates = deps
+            .require_dep::<IndirectPermFieldEnc>(region_proj)
+            .unwrap()
+            .predicate_applications;
+
+        if predicates.is_empty() {
+            // There are no resources associated with this node, skip.
+            return None;
+        }
+
+        let local = g.mir_local();
+        let local_ref = local_ref(local);
+        Some(
+            vcx.mk_conj(
+                &predicates
+                    .iter()
+                    .map(|p| p.reify(vcx, local_ref))
+                    .collect::<Vec<_>>(),
+            ),
+        )
+    }
+
+    // pub fn perm_fields<'a, E: TaskEncoder>(
+    //     &'a self,
+    //     vcx: &'vir vir::VirCtxt<'vir>,
+    //     local_defs: &'a MirLocalDefEncOutput<'vir>,
+    //     deps: &'a mut TaskEncoderDependencies<'vir, E>,
+    // ) -> impl Iterator<Item = vir::ExprBool<'vir>> + 'a {
+    //     self.inputs().filter_map(|g| {
+    //         self.encode_perm_fields_for_function_shape_node(vcx, deps, g, None, |i| {
+    //             local_defs[i].local_ex
+    //         })
+    //     })
+    // }
+
     pub fn indirect_pres<'a, E: TaskEncoder>(
         &'a self,
         vcx: &'vir vir::VirCtxt<'vir>,
         local_defs: &'a MirLocalDefEncOutput<'vir>,
         deps: &'a mut TaskEncoderDependencies<'vir, E>,
     ) -> impl Iterator<Item = vir::ExprBool<'vir>> + 'a {
-        self.inputs().filter_map(|g| {
-            self.encode_predicates_for_function_shape_node(vcx, deps, g, None, |i| {
-                local_defs[i].impure_snap
+        self.inputs()
+            .flat_map(|g| {
+                [
+                    self.encode_perm_fields_for_function_shape_node(vcx, deps, g, None, |i| {
+                        (local_defs[i].local_ex, None)
+                    }),
+                    self.encode_predicates_for_function_shape_node(vcx, deps, g, None, |i| {
+                        local_defs[i].impure_snap
+                    }),
+                ]
             })
-        })
+            .filter_map(|o| o)
     }
 
     pub fn indirect_posts<'a, E: TaskEncoder>(
@@ -344,20 +420,51 @@ impl<'vir> WandEncOutput<'vir> {
         let unblocked_input_posts = self
             .inputs()
             .filter(|i| !self.blocked_inputs().contains(i))
-            .filter_map(|lp| {
-                self.encode_predicates_for_function_shape_node(vcx, deps, lp, None, |i| {
-                    vcx.mk_old_expr(local_defs[i].impure_snap)
-                })
-            })
+            .filter_map(|lp| self.encode_unblocked_input(lp, vcx, local_defs, deps))
             .collect::<Vec<_>>()
             .into_iter();
 
-        let output_posts = self.outputs().filter_map(|g| {
-            self.encode_predicates_for_function_shape_node(vcx, deps, g, None, |i| {
-                local_defs[i].impure_snap
+        let output_posts = self
+            .outputs()
+            .flat_map(|g| {
+                [
+                    self.encode_perm_fields_for_function_shape_node(vcx, deps, g, None, |i| {
+                        (local_defs[i].local_ex, None)
+                    }),
+                    self.encode_predicates_for_function_shape_node(vcx, deps, g, None, |i| {
+                        local_defs[i].impure_snap
+                    }),
+                ]
             })
-        });
+            .filter_map(|o| o);
         unblocked_input_posts.chain(output_posts)
+    }
+
+    pub fn encode_unblocked_input<E: TaskEncoder>(
+        &self,
+        lp: FunctionShapeInput<Generalized>,
+        vcx: &'vir vir::VirCtxt<'vir>,
+        local_defs: &MirLocalDefEncOutput<'vir>,
+        deps: &mut TaskEncoderDependencies<'vir, E>,
+    ) -> Option<vir::ExprBool<'vir>> {
+        // let perm = self.encode_perm_fields_for_function_shape_node(vcx, deps, lp, None, |i| {
+        //     (local_defs[i].local_ex, Some(vir::OldLabel::None))
+        // })?;
+        let func = self.encode_predicates_for_wand_node(
+            vcx,
+            deps,
+            lp,
+            None,
+            |i| {
+                (
+                    vcx.mk_old_expr(local_defs[i].impure_snap),
+                    local_defs[i].local_ex,
+                )
+            },
+            false,
+        )?;
+        let expr = func(None);
+        Some(expr.0)
     }
 
     pub fn wand_posts<'a, E: TaskEncoder>(
@@ -368,10 +475,13 @@ impl<'vir> WandEncOutput<'vir> {
     ) -> impl Iterator<Item = vir::ExprBool<'vir>> + 'a {
         let wand_result =
             vcx.mk_local_decl("wand_result", local_defs[mir::RETURN_PLACE].local_snap.ty());
-        let wand_result_expr = vcx.mk_local_ex(wand_result);
+        let wand_result_expr = (
+            vcx.mk_local_ex(wand_result),
+            local_defs[mir::RETURN_PLACE].local_ex,
+        );
         let args = local_defs
             .args()
-            .map(|arg| vcx.mk_old_expr(arg.impure_snap));
+            .map(|arg| (vcx.mk_old_expr(arg.impure_snap), arg.local_ex));
         let args = PledgeExpr::pledge_args(wand_result_expr, args);
 
         // TODO: wands for late-bound regions
@@ -395,6 +505,7 @@ impl<'vir> WandEncOutput<'vir> {
     pub fn apply_wands<E: TaskEncoder>(
         &self,
         arguments: &[vir::ExprSnap<'vir>],
+        arguments_refs: &[vir::ExprRef<'vir>],
         label_pre: &'vir str,
         label_post: &'vir str,
         call_ctx: WandCallContext<'vir>,
@@ -403,10 +514,14 @@ impl<'vir> WandEncOutput<'vir> {
         let result = visitor
             .vcx
             .mk_local_labelled_old_expr(arguments[mir::RETURN_PLACE.as_usize()], label_post);
+        let result = (result, arguments_refs[mir::RETURN_PLACE.as_usize()]);
         let args = (1..arguments.len()).map(|l| {
-            visitor
-                .vcx
-                .mk_local_labelled_old_expr(arguments[l], label_pre)
+            (
+                visitor
+                    .vcx
+                    .mk_local_labelled_old_expr(arguments[l], label_pre),
+                arguments_refs[l],
+            )
         });
         let args = PledgeExpr::pledge_args(result, args);
         let mut decl_generator = (0..).map(|i| {
@@ -465,13 +580,13 @@ impl<'vir> WandEncOutput<'vir> {
             .rhs
             .iter()
             .zip(&mut decl_generator)
-            .filter_map(|(g, decl)| {
+            .flat_map(|(g, decl)| {
                 self.encode_predicates_for_wand_node(
                     vcx,
                     deps,
                     *g,
                     call_ctx,
-                    |i| pledge_args[i],
+                    |i| (pledge_args.get_snap(i), pledge_args.get_ref(i)),
                     false,
                 )
                 .map(|f| f(Some(decl)))
@@ -501,7 +616,7 @@ impl<'vir> WandEncOutput<'vir> {
                     deps,
                     *g,
                     call_ctx,
-                    |i| pledge_args[i],
+                    |i| (pledge_args.get_snap(i), pledge_args.get_ref(i)),
                     true,
                 )
                 .map(|f| f(Some(decl)))
