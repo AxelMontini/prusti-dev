@@ -97,6 +97,7 @@ pub struct TyUseImpureStructData<'vir> {
     ref_to_pred: PredicateIdn<'vir, (vir::Ref, vir::ManyTyVal, vir::ManyCSnap)>,
     #[allow(dead_code)]
     impure: <ImpureTyDatas as TyDatas<'vir>>::StructData,
+    alias: AliasUtils<'vir>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -289,6 +290,7 @@ impl<'a, 'vir> TyUseImpureWalker<'a, 'vir> {
             })
             .collect::<EncResult<'vir, Vec<_>>>()?;
         let data = TyUseImpureStructData {
+            alias: self.deps.require_dep::<AliasUtilsEnc>(()).unwrap(),
             args: self.args_t,
             ref_to_pred,
             impure: *data.1,
@@ -508,6 +510,48 @@ impl<'vir> TyUseImpureStruct<'vir> {
         (self.ref_to_pred)(self_ref, self.args.get_ty(), self.args.get_const())(perm)
     }
 
+    /// Inhales acc to the fields' `perm_field` and sets their value
+    /// to be the same as the to the struct's.
+    fn inhale_field_perms(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> + '_ {
+        vir::with_vcx(|vcx| {
+            let perm = perm.unwrap_or_else(|| vcx.mk_full_perm());
+            self.fields.iter().map(move |f| {
+                let field_ref = f.field_ref(self_ref);
+                let expr = vcx.mk_conj(&[
+                    self.alias.acc_perm_field(field_ref, None),
+                    vcx.mk_eq_expr(self.alias.perm_field(field_ref), perm),
+                ]);
+                vcx.mk_inhale_stmt(expr)
+            })
+        })
+    }
+
+    /// Exhales acc to the fields' `perm_field` and asserts that their value
+    /// to be the same as the to the struct's.
+    fn exhale_field_perms(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> impl Iterator<Item = vir::Stmt<'vir>> + '_ {
+        vir::with_vcx(|vcx| {
+            let perm = perm.unwrap_or_else(|| vcx.mk_full_perm());
+            let acc_self_perm = vcx.mk_assert_stmt(self.alias.acc_perm_field(self_ref, None));
+            [acc_self_perm]
+                .into_iter()
+                .chain(self.fields.iter().flat_map(move |f| {
+                    let field_ref = f.field_ref(self_ref);
+                    let acc = self.alias.acc_perm_field(field_ref, None);
+                    let expr =
+                        vcx.mk_conj(&[vcx.mk_eq_expr(self.alias.perm_field(field_ref), perm), acc]);
+                    [vcx.mk_assert_stmt(acc), vcx.mk_exhale_stmt(expr)]
+                }))
+        })
+    }
+
     /// Fold the predicate (including generic casts).
     fn fold(
         &self,
@@ -516,7 +560,10 @@ impl<'vir> TyUseImpureStruct<'vir> {
     ) -> impl Iterator<Item = vir::Stmt<'vir>> + '_ {
         let pred_app = self.ref_to_pred_app(self_ref, perm);
         let fold = vir::with_vcx(|vcx| vcx.mk_fold_stmt(pred_app));
-        self.cast_to_callee_ctx(self_ref).chain([fold])
+
+        self.exhale_field_perms(self_ref, perm)
+            .chain(self.cast_to_callee_ctx(self_ref))
+            .chain([fold])
     }
 
     /// Unfold the predicate (including generic casts).
@@ -527,9 +574,11 @@ impl<'vir> TyUseImpureStruct<'vir> {
     ) -> impl Iterator<Item = vir::Stmt<'vir>> + '_ {
         let pred_app = self.ref_to_pred_app(self_ref, perm);
         let unfold = vir::with_vcx(|vcx| vcx.mk_unfold_stmt(pred_app));
+
         [unfold]
             .into_iter()
             .chain(self.cast_to_caller_ctx(self_ref)) // TODO: Axel: Should this also take perm?
+            .chain(self.inhale_field_perms(self_ref, perm))
     }
 
     fn cast_to_caller_ctx(
