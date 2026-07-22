@@ -344,9 +344,19 @@ impl<'vir> WandEncOutput<'vir> {
             .inputs()
             .filter(|i| !self.blocked_inputs().contains(i))
             .filter_map(|lp| {
-                self.encode_predicates_for_function_shape_node(vcx, deps, lp, None, |i| {
-                    vcx.mk_old_expr(local_defs[i].impure_snap)
-                })
+                let decl = vcx.mk_local_decl(
+                    vir::vir_format!(vcx, "_unblock_{}", lp.base()),
+                    vir::TYPE_PERM,
+                );
+                let (expr, perm) = self.encode_predicates_for_wand_node(
+                    vcx,
+                    deps,
+                    lp,
+                    None,
+                    |i| vcx.mk_old_expr(local_defs[i].impure_snap),
+                    false,
+                )?(Some(decl));
+                Some(vcx.mk_let_expr(decl, vcx.mk_old_expr(perm), expr))
             })
             .collect::<Vec<_>>()
             .into_iter();
