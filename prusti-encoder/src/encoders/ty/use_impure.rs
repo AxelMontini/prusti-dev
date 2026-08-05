@@ -552,7 +552,8 @@ impl<'vir> TyUseImpureStruct<'vir> {
         })
     }
 
-    /// Fold the predicate (including generic casts).
+    /// Fold the predicate (including generic casts) with given `perm`.
+    /// Also exhales each field's `perm_field` after asserting that they equal `perm`.
     fn fold(
         &self,
         self_ref: vir::ExprRef<'vir>,
@@ -564,9 +565,12 @@ impl<'vir> TyUseImpureStruct<'vir> {
         self.exhale_field_perms(self_ref, perm)
             .chain(self.cast_to_callee_ctx(self_ref))
             .chain([fold])
+
+        // self.cast_to_callee_ctx(self_ref).chain([fold])
     }
 
-    /// Unfold the predicate (including generic casts).
+    /// Unfold the predicate (including generic casts) with given `perm`.
+    /// Then inhales each field's `perm_field` and sets their value to `perm`
     fn unfold(
         &self,
         self_ref: vir::ExprRef<'vir>,
@@ -820,18 +824,18 @@ impl<'vir> TyUseImpureImmRef<'vir> {
         )
     }
 
-    pub(crate) fn unbind_unblock_refs(
-        &self,
-        target_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
-        source_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
-        label: Option<vir::OldLabel<'vir>>,
-    ) -> impl Iterator<Item = vir::Stmt<'vir>> {
-        self.unbind_unblock(
-            self.deref_access(target_immref, label),
-            self.deref_access(source_immref, label),
-        )
-    }
-
+    // pub(crate) fn unbind_unblock_refs(
+    //     &self,
+    //     target_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+    //     source_immref: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
+    //     label: Option<vir::OldLabel<'vir>>,
+    // ) -> impl Iterator<Item = vir::Stmt<'vir>> {
+    //     self.unbind_unblock(
+    //         self.deref_access(target_immref, label),
+    //         self.deref_access(source_immref, label),
+    //     )
+    // }
+    //
     pub(crate) fn unbind_unblock(
         &self,
         target: &'vir vir::ExprGenData<'vir, (), !, vir::Ref>,
