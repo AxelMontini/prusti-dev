@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Deref};
 
 use itertools::Itertools;
 use pcg::{
@@ -6,7 +6,7 @@ use pcg::{
     action::{BorrowPcgAction, PcgAction, PcgActions},
     borrow_pcg::{
         action::BorrowPcgActionKind,
-        borrow_pcg_edge::BorrowPcgEdge,
+        borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeLike},
         borrow_pcg_expansion::BorrowPcgExpansion,
         edge::{
             abstraction::{AbstractionEdge, FunctionCallOrLoop},
@@ -578,11 +578,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
 
         self.stmt(self.vcx.mk_assert_stmt(
-            data.acc_perm_field(data.deref_access(ref_p_source, label_source), None),
+            data.acc_perm_field(data.blocked_access(ref_p_target, label_target), None),
         ));
-        // TODO: Label?
-        let stmts_iter =
-            data.unbind_unblock_refs(ref_p_target, ref_p_source, label.map(vir::OldLabel::Label));
+        // TODO: Axel: is there a downside of using *(target.blocked) instead of *source in the RHS
+        // of unblock? In some cases *source is not available anymore (e.g. struct field where the
+        // struct was previously already folded).
+        // There should be an assertion to make sure that *(target.blocked) is the same Ref as *source,
+        // but often the label is None and thus not doable...
+        let stmts_iter = data.unbind_unblock(
+            data.deref_access(ref_p_target, label_target),
+            data.blocked_access(ref_p_target, label_target), /*ref_p_source*/
+        );
         self.stmts(stmts_iter);
     }
 
@@ -630,7 +636,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .then(|| {
                 let before_unbind_label = self.new_label("before_unbind");
                 let perm = data.perm_field(
-                    ref_p_source,
+                    data.deref_access(ref_p_target, label_target),
                     Some(vir::OldLabel::Label(before_unbind_label)),
                 );
 
@@ -893,7 +899,10 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 let dst_ty_out = self.ty_use_impure(dst_ty.ty);
 
                 let dst_enc = self.encode_place(dst.place());
-                comment!(self, "exhale due to removal of BorrowFlow");
+                comment!(
+                    self,
+                    "exhale due to removal of BorrowFlow with label {label:?}"
+                );
                 self.stmt(self.vcx.mk_exhale_stmt(dst_ty_out.ref_to_pred(
                     self.vcx,
                     dst_enc.expr.expect_predicate(),
@@ -975,12 +984,124 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     label,
                 );
             }
-            // Ignore expansions of lifetime projections for now
+            // // Borrowexpansion of lifetimeprojections is needed in order to support
+            // // field reborrowing.
+            // BorrowPcgEdgeKind::BorrowPcgExpansion(expansion)
+            //     if let PcgNode::LifetimeProjection(proj) = expansion.base() =>
+            // 'exp: {
+            //     tracing::debug!(
+            //         ?expansion,
+            //         is_deref = expansion.is_deref(self.pcg_ctxt()),
+            //         "BorrowExpansion edge"
+            //     );
+            //     if expansion.is_deref(self.pcg_ctxt()) {
+            //         tracing::debug!(?expansion, "ignore Dereference Expansion");
+            //         comment!(self, "dereference expansion ignored");
+            //         break 'exp;
+            //     }
+            //     //
+            //     // let mut primes = (3..100)
+            //     //     .step_by(2)
+            //     //     .filter(|p| (3..p / 2).step_by(2).all(|d| p % d != 0));
+            //     let mut primes = [2].into_iter().cycle(); // TODO: Axel: Remove after testing
+            //
+            //     let idx = proj.region_idx();
+            //     let a = primes.nth(idx.index()).unwrap();
+            //     let targets = expansion.expansion();
+            //     // TODO: This is probably not always true?
+            //     assert_eq!(targets.len(), 1);
+            //     tracing::debug!(?targets, ?proj, a, "BorrowExpansion edge");
+            //
+            //     // TODO: Axel: un-suck this impl
+            //     let target = targets[0];
+            //     let target_p = self.encode_place(target.place());
+            //     let target_p = target_p.expr.expect_predicate();
+            //
+            //     let base = proj.base();
+            //     let label = if let MaybeLabelledPlace::Labelled(snap) = base {
+            //         Some(self.get_location_label(snap.at()))
+            //     } else {
+            //         label.map(vir::OldLabel::Label)
+            //     };
+            //
+            //     let (ref_p, _, _, _) = self.encode_place_with_snap(base.place());
+            //     let ref_p = self
+            //         .vcx
+            //         .maybe_apply_label(ref_p.expr.expect_predicate(), label);
+            //
+            //     let alias = self.deps.require_ref::<AliasUtilsEnc>(()).unwrap();
+            //     let pre_assign_label = vir::OldLabel::Label(self.new_label("please"));
+            //     let perm_field = alias.perm_field(ref_p);
+            //
+            //     // No field assignment yet......
+            //     // self.stmt(
+            //     //     self.vcx()
+            //     //         .mk_pure_assign_stmt(self.vcx().mk_field_expr(ref_p, perm_field), new_perm),
+            //     // );
+            //     if edge_action.is_add() {
+            //         let new_perm = self.vcx().mk_old(
+            //             self.vcx()
+            //                 .mk_bin_op_expr(
+            //                     vir::BinOpKind::Mul,
+            //                     perm_field,
+            //                     self.vcx()
+            //                         .mk_const_expr(vir::ConstData::Perm(1, a))
+            //                         .downcast_ty(),
+            //                 )
+            //                 .downcast_ty(),
+            //             pre_assign_label,
+            //         );
+            //         let split_perm = self
+            //             .vcx()
+            //             .mk_bin_op_expr(
+            //                 vir::BinOpKind::Sub,
+            //                 self.vcx().mk_old(perm_field, pre_assign_label),
+            //                 new_perm,
+            //             )
+            //             .downcast_ty();
+            //         self.stmts([
+            //             self.vcx().mk_exhale_stmt(alias.acc_perm_field(ref_p, None)),
+            //             self.vcx()
+            //                 .mk_exhale_stmt(alias.acc_perm_field(target_p, None)),
+            //             self.vcx().mk_inhale_stmt(self.vcx().mk_conj(&[
+            //                 alias.acc_perm_field(ref_p, None),
+            //                 self.vcx().mk_eq_expr(perm_field, new_perm),
+            //             ])),
+            //             self.vcx().mk_inhale_stmt(
+            //                 self.vcx().mk_conj(&[
+            //                     alias.acc_perm_field(target_p, None),
+            //                     self.vcx()
+            //                         .mk_eq_expr(alias.perm_field(target_p), split_perm),
+            //                 ]),
+            //             ),
+            //         ]);
+            //     } else {
+            //         self.stmts([
+            //             self.vcx().mk_exhale_stmt(alias.acc_perm_field(ref_p, None)),
+            //             self.vcx().mk_inhale_stmt(
+            //                 self.vcx().mk_conj(&[
+            //                     alias.acc_perm_field(ref_p, None),
+            //                     self.vcx().mk_eq_expr(
+            //                         perm_field,
+            //                         self.vcx()
+            //                             .mk_bin_op_expr(
+            //                                 vir::BinOpKind::Add,
+            //                                 self.vcx().mk_old(perm_field, pre_assign_label),
+            //                                 alias.perm_field(target_p),
+            //                             )
+            //                             .downcast_ty(),
+            //                     ),
+            //                 ]),
+            //             ),
+            //             // self.vcx()
+            //             //     .mk_exhale_stmt(alias.acc_perm_field(target_p, None)),
+            //         ]);
+            //     }
+            // }
             BorrowPcgEdgeKind::BorrowPcgExpansion(expansion)
                 if let PcgNode::Place(base) = expansion.base() =>
             {
-                // TODO: Axel: is the place ALWAYS borrowed?
-                // TODO: Pass permission here
+                tracing::debug!(targets=?expansion.expansion(), ?base, "BorrowPcgExpansion edge");
                 self.fold_or_unfold(
                     base,
                     FoldOrUnfold::for_action(edge_action),
@@ -1206,10 +1327,16 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     }
                     _ => None,
                 });
+                // (un)pack with permission.
+                // Only unpack with `write` perm if exclusive.
+                let perm = capability_kind.is_read().then(|| {
+                    let alias = self.deps.require_dep::<AliasUtilsEnc>(()).unwrap();
+                    alias.perm_field(place_enc)
+                });
                 if matches!(repack_op, pcg::free_pcs::RepackOp::Expand(..)) {
-                    self.stmts(data.unfold(place_ty.variant_index, place_enc, index, None, None));
+                    self.stmts(data.unfold(place_ty.variant_index, place_enc, index, perm, None));
                 } else if matches!(repack_op, pcg::free_pcs::RepackOp::Collapse(..)) {
-                    self.stmts(data.fold(place_ty.variant_index, place_enc, index, None, None));
+                    self.stmts(data.fold(place_ty.variant_index, place_enc, index, perm, None));
                 } else {
                     unreachable!()
                 }
@@ -1479,6 +1606,8 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         (func_def_id, caller_substs, is_pure)
     }
 
+    // TODO: Axel: for some reason this doesn't always declare the temp var? Breaks inside if
+    // statements mostly.
     fn new_tmp<T: CompType>(&mut self, ty: vir::Type<'vir, T>) -> vir::Expr<'vir, T> {
         let name = vir::vir_format!(self.vcx, "_tmp{}", self.tmp_ctr);
         let local = vir::vir_local_decl! { self.vcx; [name] : [ty] };
