@@ -563,7 +563,7 @@ impl<'vir> TyUseImpureStruct<'vir> {
         let fold = vir::with_vcx(|vcx| vcx.mk_fold_stmt(pred_app));
 
         self.exhale_field_perms(self_ref, perm)
-            .chain(self.cast_to_callee_ctx(self_ref))
+            .chain(self.cast_to_callee_ctx(self_ref, perm))
             .chain([fold])
 
         // self.cast_to_callee_ctx(self_ref).chain([fold])
@@ -581,26 +581,28 @@ impl<'vir> TyUseImpureStruct<'vir> {
 
         [unfold]
             .into_iter()
-            .chain(self.cast_to_caller_ctx(self_ref)) // TODO: Axel: Should this also take perm?
+            .chain(self.cast_to_caller_ctx(self_ref, perm)) // TODO: Axel: Should this also take perm?
             .chain(self.inhale_field_perms(self_ref, perm))
     }
 
     fn cast_to_caller_ctx(
         &self,
         self_ref: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         self.fields
             .iter()
-            .filter_map(|f| f.cast_to_caller_ctx(self_ref))
+            .filter_map(move |f| f.cast_to_caller_ctx(self_ref, perm))
     }
 
     fn cast_to_callee_ctx(
         &self,
         self_ref: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
     ) -> impl Iterator<Item = vir::Stmt<'vir>> {
         self.fields
             .iter()
-            .filter_map(|f| f.cast_to_callee_ctx(self_ref))
+            .filter_map(move |f| f.cast_to_callee_ctx(self_ref, perm))
     }
 }
 
@@ -614,12 +616,26 @@ impl<'vir> TyUseImpureField<'vir> {
         self.impure.ref_to_field_ref.call()(self_ref, self.args.get_ty(), self.args.get_const())
     }
 
-    fn cast_to_caller_ctx(&self, self_ref: vir::ExprRef<'vir>) -> Option<vir::Stmt<'vir>> {
-        self.caster.cast_to_caller_ctx(self.field_ref(self_ref))
+    fn cast_to_caller_ctx(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> Option<vir::Stmt<'vir>> {
+        self.caster.partial_cast_to_caller_ctx(
+            self.field_ref(self_ref),
+            perm.unwrap_or_else(|| vir::with_vcx(|vcx| vcx.mk_full_perm())),
+        )
     }
 
-    fn cast_to_callee_ctx(&self, self_ref: vir::ExprRef<'vir>) -> Option<vir::Stmt<'vir>> {
-        self.caster.cast_to_callee_ctx(self.field_ref(self_ref))
+    fn cast_to_callee_ctx(
+        &self,
+        self_ref: vir::ExprRef<'vir>,
+        perm: Option<vir::ExprPerm<'vir>>,
+    ) -> Option<vir::Stmt<'vir>> {
+        self.caster.partial_cast_to_callee_ctx(
+            self.field_ref(self_ref),
+            perm.unwrap_or_else(|| vir::with_vcx(|vcx| vcx.mk_full_perm())),
+        )
     }
 }
 
