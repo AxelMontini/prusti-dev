@@ -1329,9 +1329,17 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 });
                 // (un)pack with permission.
                 // Only unpack with `write` perm if exclusive.
+                // If `read`, then we should keep some acc(p_Struct, _) around, as it may be
+                // borrowed
                 let perm = capability_kind.is_read().then(|| {
                     let alias = self.deps.require_dep::<AliasUtilsEnc>(()).unwrap();
-                    alias.perm_field(place_enc)
+                    self.vcx()
+                        .mk_bin_op_expr(
+                            vir::BinOpKind::PermMul,
+                            alias.perm_field(place_enc),
+                            self.vcx().mk_perm::<1, 2>(),
+                        )
+                        .downcast_ty()
                 });
                 if matches!(repack_op, pcg::free_pcs::RepackOp::Expand(..)) {
                     self.stmts(data.unfold(place_ty.variant_index, place_enc, index, perm, None));

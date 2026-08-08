@@ -2,8 +2,10 @@ use prusti_contracts::*;
 
 fn main() {}
 
-#[ensures(result == old(k))]
-fn immref_straightline(k: i32) -> i32 {
+// TODO: Consider overflows in these tests
+
+#[ensures(result == old(k) * 3)]
+fn immref_reborrow(k: i32) -> i32 {
     // Borrow
     let x = &k;
     // Re-borrow
@@ -11,10 +13,20 @@ fn immref_straightline(k: i32) -> i32 {
     // Copy ref (BorrowFlow edge)
     let z = y;
 
-    prusti_assert_eq!(1, 0);
-    // prusti_assert_eq!({ *x }, { *y });
-    // prusti_assert_eq!(*x, *z);
-    // prusti_assert_eq!(*x, k);
+    *x + *y + *z
+}
 
-    *x
+#[ensures(result == old(k) + 5)]
+fn immref_release(mut k: i32) -> i32 {
+    let x = &k;
+    let j = *x;
+    if j == k {
+        k += 5;
+    }
+
+    if k > j {
+        k
+    } else {
+        j
+    }
 }
