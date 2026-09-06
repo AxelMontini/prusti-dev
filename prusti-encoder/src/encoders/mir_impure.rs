@@ -11,7 +11,7 @@ use pcg::{
             borrow_flow::{BorrowFlowEdgeKind, OperandType},
             kind::BorrowPcgEdgeKind,
         },
-        region_projection::PlaceOrConst,
+        region_projection::{PcgLifetimeProjectionBaseLike, PlaceOrConst},
         state::BorrowsState,
         unblock_graph::BorrowPcgUnblockAction,
     },
@@ -331,14 +331,15 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 // Borrowflow binds blocked to shadow(blocked, p), and the current perm is `p/2`! So
                 // we pass twice the current permission.
                 // TODO: Use old value with label instead of *2.
-                let perm = self
-                    .vcx()
-                    .mk_bin_op_expr(
-                        vir::BinOpKind::PermPermDiv,
-                        inner.deref_perm_field(place_ref, None),
-                        self.vcx().mk_perm::<1, 2>(),
-                    )
-                    .downcast_ty();
+                // let perm = self
+                //     .vcx()
+                //     .mk_bin_op_expr(
+                //         vir::BinOpKind::PermPermDiv,
+                //         inner.deref_perm_field(place_ref, None),
+                //         self.vcx().mk_perm::<1, 2>(),
+                //     )
+                //     .downcast_ty();
+                let perm = inner.deref_perm_field(place_ref, None);
 
                 let metadata = inner.metadata_access_caller(place_ref);
 
@@ -469,7 +470,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                     let inner = p_rvalue_ty.expect_immref();
                     let place_ref = place_expr.expr.address;
                     let perm = inner.perm_field(place_ref, None);
-                    let perm = self
+                    let half_perm = self
                         .vcx()
                         .mk_bin_op_expr(vir::BinOpKind::PermMul, perm, self.vcx().mk_perm::<1, 2>())
                         .downcast_ty();
@@ -484,7 +485,9 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                             // must have `acc(p_Param(rhs, ty), rhs.perm_field)`. It then gets
                             // halved by binding.
                             // NOTE: `perm` parameter is ignored
-                            let stmts = inner.fold_actual(lhs_place, None, Some(perm)).into_iter();
+                            let stmts = inner
+                                .fold_actual(lhs_place, None, Some(half_perm))
+                                .into_iter();
                             // Bind shadow ref and blocked place
                             let stmts = stmts.chain(
                                 inner.bind_block(inner.deref_access(lhs_place, None), place_ref),
@@ -593,6 +596,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         target_immref: MaybeLabelledPlace<'vir>,
         source_immref: MaybeLabelledPlace<'vir>,
         label: Option<&'vir str>,
+        concretize: bool,
     ) {
         let place_target = target_immref.place();
         let label_target = match target_immref {
@@ -620,6 +624,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         self.stmt(self.vcx.mk_assert_stmt(
             data.acc_perm_field(data.blocked_access(ref_p_target, label_target), None),
         ));
+        let before_unbind_label = self.new_label("before_unbind");
         // TODO: Axel: is there a downside of using *(target.blocked) instead of *source in the RHS
         // of unblock? In some cases *source is not available anymore (e.g. struct field where the
         // struct was previously already folded).
@@ -629,7 +634,19 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             data.deref_access(ref_p_target, label_target),
             data.blocked_access(ref_p_target, label_target), /*ref_p_source*/
         );
-        self.stmts(stmts_iter);
+
+        let cast = concretize.then(|| {
+            let old_target_perm = self.vcx.mk_local_labelled_old_expr(
+                data.deref_perm_field(ref_p_target, label_source),
+                before_unbind_label,
+            );
+            let cast = data
+                .unfold_shadow(ref_p_source, label_source, Some(old_target_perm))
+                .unwrap();
+            cast
+        });
+
+        self.stmts(stmts_iter.chain(cast));
     }
 
     /// Unbind a ref's shadow and unblock the source.
@@ -691,11 +708,13 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
     /// Binds immref src with `shadow(*src, (*src).perm)`. Used in Add: BorrowFlow,
     /// as the immref is not yet initialized there.
+    /// Optionally, if `generalize`, will make_generic `*src` with `(*src).perm/`).
     #[tracing::instrument(skip(self))]
     pub(crate) fn bind_block_shadow(
         &mut self,
         source_immref: MaybeLabelledPlace<'vir>,
         label: Option<&'vir str>,
+        generalize: bool,
     ) {
         let place_source = source_immref.place();
         let label_source = match source_immref {
@@ -710,8 +729,24 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             .maybe_apply_label(ref_p_source.expr.expect_predicate(), label_source);
         let data = self.ty_use_impure(place_ty_source.ty).expect_immref();
         let src = data.deref_access(ref_p_source, None);
-        let src_shadow = data.shadow_for(src, None);
-        let stmts = data.bind_block(src_shadow, src);
+        let dst_shadow = data.shadow_for(src, None);
+
+        if generalize {
+            let half_src_perm = self
+                .vcx()
+                .mk_bin_op_expr(
+                    vir::BinOpKind::PermMul,
+                    data.deref_perm_field(ref_p_source, label_source),
+                    self.vcx().mk_perm::<1, 2>(),
+                )
+                .downcast_ty();
+            let cast = data
+                .fold_shadow(ref_p_source, label_source, Some(half_src_perm))
+                .unwrap();
+            self.stmt(cast);
+        }
+
+        let stmts = data.bind_block(dst_shadow, src);
         self.stmts(stmts);
     }
 
@@ -914,10 +949,19 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
 
                 // src is an immref. It must be dereferenced (shadow) before binding.
                 let src = src.as_local_place().unwrap();
+                comment!(self, "Graph: {:?}", borrows_state.graph());
                 // let dst = borrow_flow.short().base();
                 // Well... Since dst hasn't been assigned to yet, we cannot use it as a ref.
                 // Since later `dst.0 == shadow_for(src, src.perm))`, we just use that.
-                self.bind_block_shadow(src, label);
+                // Also, we may need to cast: if the reference is currently dereferenced, its type
+                // predicate will be concrete, and we need half of it to turn generic.
+                let generalize = borrows_state.graph().edges().any(
+                    |e| matches!(e.kind(), BorrowPcgEdgeKind::Deref(d) if d.blocked_place() == src),
+                );
+                if generalize {
+                    self.comment("BorrowFlow with Deref edge, must generalize half");
+                }
+                self.bind_block_shadow(src, label, generalize);
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if edge_action.is_remove()
@@ -928,26 +972,54 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
                 let PlaceOrConst::Place(src) = borrow_flow.long().base() else {
                     unreachable!();
                 };
-                // src is an immref. It must be dereferenced (shadow) before binding.
+                // src is an immref. It must be dereferenced (shadow) before unbinding.
                 let src = src.as_local_place().unwrap();
                 let dst = borrow_flow.short().base();
+
+                comment!(self, "Remove BorrowFlow {src} -> {dst}");
+
+                // FIXME: Axel: Why THE FUCK is the graph ALWAYS EMPTY HERE???? There's still nodes
+                // in it, what the actual fuck is going on? How am I supposed to know the borrow
+                // state at this program point if the thing passed to this function is goddamn empty???
+                // let borrows_state = self.pcs_handle_edge_conditionless
+                let concretize = borrows_state.graph().edges().any(
+                    |e| matches!(e.kind(), BorrowPcgEdgeKind::Deref(d) if d.blocked_place() == src),
+                );
+                if concretize {
+                    self.comment(
+                        "BorrowFlow with Deref edge, must concretize the whole unbound amount",
+                    );
+                }
+
                 // self.fold(src, label); // not needed, if behind a ref (borrowflow) it's already
                 // generic
-                self.unbind_unblock_refs(dst, src, label);
+                self.unbind_unblock_refs(dst, src, label, concretize);
                 let dst_ty = dst.ty(self.pcg_ctxt());
                 assert!(dst_ty.variant_index.is_none());
                 let dst_ty_out = self.ty_use_impure(dst_ty.ty);
 
-                let dst_enc = self.encode_place(dst.place());
-                comment!(
-                    self,
-                    "exhale due to removal of BorrowFlow with label {label:?}"
-                );
-                self.stmt(self.vcx.mk_exhale_stmt(dst_ty_out.ref_to_pred(
-                    self.vcx,
-                    dst_enc.expr.expect_predicate(),
-                    None,
-                )));
+                // We only exhale if the target is not labelled. If it is labelled, it means it has
+                // already been exhaled previously! (such as when it's moved out)
+                match dst {
+                    MaybeLabelledPlace::Current(_) => {
+                        let dst_enc = self.encode_place(dst.place());
+                        comment!(
+                            self,
+                            "exhale due to removal of BorrowFlow with current target"
+                        );
+                        self.stmt(self.vcx.mk_exhale_stmt(dst_ty_out.ref_to_pred(
+                            self.vcx,
+                            dst_enc.expr.expect_predicate(),
+                            None,
+                        )));
+                    }
+                    MaybeLabelledPlace::Labelled(l) => {
+                        comment!(
+                            self,
+                            "DON'T exhale, since BorrowFlow target has a label: {l}"
+                        );
+                    }
+                };
             }
             BorrowPcgEdgeKind::BorrowFlow(borrow_flow)
                 if let BorrowFlowEdgeKind::Assignment(assignment_data) = borrow_flow.kind()
@@ -1237,6 +1309,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         actions: &[BorrowPcgUnblockAction<'vir>],
         label: Option<&'vir str>,
     ) -> EncodeResult<'vir, (), E> {
+        comment!(self, "Unblock actions");
         let mut to_skip = Vec::new();
         for action in actions {
             self.pcs_handle_edge(
@@ -1257,6 +1330,11 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
         actions: &PcgActions<'vir>,
         edge_to_loop: bool,
     ) -> EncodeResult<'vir, (), E> {
+        // Well, well, well... The pcg passed here is the state AFTER every action is applied...
+        // This means that it's UTTERLY useless to reason about the graph state immediately after
+        // performing the action, which is required for removing borrow-flow edges...
+        // As such, the borrow graph is reconstructed by reversing each action from the final state,
+        // which is turbougly but it works, ig
         for action in actions.iter() {
             match action {
                 PcgAction::Borrow(action) => self.borrow_action(pcg, action, edge_to_loop)?,
@@ -1455,7 +1533,7 @@ impl<'vir, 'enc, E: TaskEncoder> ImpureEncVisitor<'vir, 'enc, E> {
             place_enc.expr.expect_predicate(),
             None,
         )));
-        self.stmt(self.vcx.mk_refute_stmt(self.vcx.mk_bool::<false>())); // TODO: Axel: Remove later
+        // self.stmt(self.vcx.mk_refute_stmt(self.vcx.mk_bool::<false>())); // TODO: Axel: Remove later
     }
 
     fn loop_analysis(&mut self) -> &LoopAnalysis {

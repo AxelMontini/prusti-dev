@@ -741,7 +741,7 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     }
 
     /// If [`perm`] is `None`, then the value of the perm field is used.
-    fn fold_shadow(
+    pub(crate) fn fold_shadow(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
@@ -769,7 +769,7 @@ impl<'vir> TyUseImpureImmRef<'vir> {
     }
 
     /// If [`perm`] is `None`, then the value of the perm field is used.
-    fn unfold_shadow(
+    pub(crate) fn unfold_shadow(
         &self,
         self_ref: vir::ExprRef<'vir>,
         label: Option<vir::OldLabel<'vir>>,
